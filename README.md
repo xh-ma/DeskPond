@@ -53,7 +53,14 @@ Unity.exe -batchmode -quit -projectPath . -executeMethod DeskPondBuild.Run
 
 Close any running `DeskPond.exe` first; it locks `UnityPlayer.dll` and the build fails.
 
+## Licence
+
+[PolyForm Noncommercial 1.0.0](LICENSE.md). Free to read, build, modify and share
+for personal projects, study, and any non-profit purpose. Selling it, or shipping it
+inside something sold, needs permission.
+
 ## Credits
 
 UI font is [Silkscreen](https://fonts.google.com/specimen/Silkscreen) by Jason Kottke,
-SIL Open Font License, included in `Assets/Resources/Fonts/OFL.txt`.
+SIL Open Font License, included in `Assets/Resources/Fonts/OFL.txt`. The font keeps
+its own licence and is not covered by the one above.
