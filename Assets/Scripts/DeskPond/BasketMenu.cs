@@ -69,6 +69,9 @@ namespace DeskPond
         AnimationCurve _openCurve;
         float _openSeconds = 0.18f;
 
+        /// <summary>Invoked by the stats button; GameSession supplies the handler.</summary>
+        public Action OnStatsRequested;
+
         public bool IsOpen => _panel != null && _panel.gameObject.activeSelf;
 
         /// <summary>True while a move or resize drag is in progress, so clicks stay captured.</summary>
@@ -390,8 +393,10 @@ namespace DeskPond
                 var kind = (UpgradeKind)i;
                 var level = ShopDefs.Level(save, kind);
                 var max = ShopDefs.MaxLevel(kind);
+                var cfg = _session.Config;
+                var adaptiveMinutes = cfg != null && cfg.adaptivePacing ? cfg.minutesPerFish : 0f;
                 _upgradeLabels[i].text = ShopDefs.Label(kind) + "  " + level + "/" + max +
-                                         "   " + ShopDefs.Effect(kind, level);
+                                         "   " + ShopDefs.Effect(kind, level, adaptiveMinutes);
 
                 var cost = ShopDefs.NextCost(kind, level);
                 _upgradeButtons[i].Label.text = cost < 0 ? "MAX" : cost + "c";
@@ -518,14 +523,17 @@ namespace DeskPond
 
             y -= 4f;
             _status = MakeLabel(_panel, "Status", new Vector2(pad, y - 2f), 10, TextAnchor.UpperLeft,
-                UiKit.TextMuted, "", 180f, FontStyle.Normal);
+                UiKit.TextMuted, "", _width - pad * 2f - 136f, FontStyle.Normal);
 
             var close = AddButton(_panel, "Close", new Rect(_width - pad - 24f, y, 24f, 18f), "✕",
                 Close, null, UiKit.ButtonFace, 10);
             var quit = AddButton(_panel, "Quit", new Rect(_width - pad - 74f, y, 46f, 18f), "quit",
                 QuitGame, null, UiKit.QuitFace, 10);
+            var stats = AddButton(_panel, "Stats", new Rect(_width - pad - 130f, y, 52f, 18f), "stats",
+                () => OnStatsRequested?.Invoke(), null, UiKit.ButtonFace, 10);
             _ = close;
             _ = quit;
+            _ = stats;
             y -= 24f;
 
             _height = -y + 8f;
