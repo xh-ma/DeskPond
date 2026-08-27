@@ -448,8 +448,7 @@ namespace DeskPond
         void RefreshApps(ActivityLog log)
         {
             var from = DateTime.Now.Date.ToUniversalTime();
-            var totals = log.AppTotals(from, DateTime.UtcNow.AddMinutes(1),
-                TitlesRecording);
+            var totals = log.AppTotals(from, from.AddDays(1), TitlesRecording);
 
             var peak = 1;
             for (var i = 0; i < totals.Count && i < AppRows; i++)
@@ -487,8 +486,10 @@ namespace DeskPond
         /// <summary>The headline number: clicks and keystrokes counted together, as one total.</summary>
         void RefreshCounts(ActivityLog log)
         {
+            // The whole of today, not "today up to this second": the totals mean the same thing
+            // either way in normal use, and this does not depend on where the clock happens to be.
             var dayStart = DateTime.Now.Date.ToUniversalTime();
-            var today = log.InputTotal(dayStart, DateTime.UtcNow.AddMinutes(1));
+            var today = log.InputTotal(dayStart, dayStart.AddDays(1));
             _counts.text = Count(today) + " today";
 
             var counter = _session != null ? _session.Input : null;
