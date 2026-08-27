@@ -15,6 +15,52 @@ namespace DeskPond
                  "1 = normal, 0.05 = bites almost instantly.")]
         public float inputCostScale = 1f;
 
+        [Header("Pacing")]
+        [Tooltip("Set the cost of a fish from how fast this user actually works, instead of " +
+                 "rolling in a fixed range. Turn off to compare the two by feel.")]
+        public bool adaptivePacing = true;
+
+        [Range(1f, 30f)]
+        [Tooltip("Minutes of active work one fish should take, once pacing has learned the user's " +
+                 "rate. Rod upgrades cut this.")]
+        public float minutesPerFish = 5f;
+
+        [Range(0f, 0.9f)]
+        [Tooltip("How much the cost of each fish varies around the target, so bites stay a little " +
+                 "unpredictable. 0.3 = plus or minus 30%.")]
+        public float pacingSpread = 0.3f;
+
+        [Min(1)]
+        [Tooltip("Hard floor on inputs per fish, before rod upgrades.")]
+        public int pacingMinInputs = 10;
+
+        [Min(50)]
+        [Tooltip("Hard ceiling on inputs per fish, before rod upgrades.")]
+        public int pacingMaxInputs = 4000;
+
+        [Header("Activity log")]
+        [Tooltip("Record which applications are in front, for the activity stats. " +
+                 "Turning this off stops all logging.")]
+        public bool trackActivity = true;
+
+        [Tooltip("Also record window titles, not just process names. Off by default: a title can " +
+                 "carry document names, page titles and who you were talking to, which is not " +
+                 "something to collect quietly from anyone else running a build.")]
+        public bool recordWindowTitles;
+
+        [Range(1f, 30f)]
+        [Tooltip("Seconds between foreground window samples.")]
+        public float foregroundPollSeconds = 5f;
+
+        [Range(1, 365)]
+        [Tooltip("Days of activity history to keep. Older slices are deleted on write.")]
+        public int retentionDays = 30;
+
+        [Range(0, 90)]
+        [Tooltip("Days to keep window titles. Shorter than the history above on purpose: rhythm " +
+                 "stats want the long view, titles do not. 0 deletes them at the next write.")]
+        public int titleRetentionDays = 7;
+
         [Header("Idle fishing")]
         [Min(0.5f)]
         [Tooltip("Seconds without any input before the cat counts as idle and the timer starts.")]
@@ -46,6 +92,13 @@ namespace DeskPond
 
         [Min(0.05f)]
         public float popupOpenSeconds = 0.18f;
+
+        [Header("Performance")]
+        [Range(10, 144)]
+        [Tooltip("Frames per second cap. Without one the scene renders as fast as the machine " +
+                 "allows, which burns a whole CPU core to animate a cat at 3fps. Only takes " +
+                 "effect while vSync is off, which it is.")]
+        public int targetFrameRate = 30;
 
         [Header("Pet")]
         [Range(1f, 8f)]
