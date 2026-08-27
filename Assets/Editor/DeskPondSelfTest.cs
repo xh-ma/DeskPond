@@ -34,6 +34,9 @@ public static class DeskPondSelfTest
         TitlesCanBeForgotten();
         TitleRetentionStripsButKeepsTime();
         PacingClampsAndVaries();
+        ChangePointFindsPlantedShifts();
+        PruningMatchesTheExhaustiveOptimum();
+        SessionsFollowTheDaysShape();
 
         Debug.Log($"SELFTEST DONE failures={_failed}");
         EditorApplication.Exit(_failed == 0 ? 0 : 1);
@@ -163,5 +166,110 @@ public static class DeskPondSelfTest
         rod.TryGetTarget(5f, 1f, 10, 4000, 0f, rng, out var plain);
         rod.TryGetTarget(5f, ShopDefs.RodFactor(3), 10, 4000, 0f, rng, out var upgraded);
         Check("rod upgrades lower the cost", upgraded < plain, $"{plain} -> {upgraded}");
+    }
+
+    static string Show(System.Collections.Generic.List<int> v) => string.Join(",", v);
+
+    /// <summary>A series with known shifts should be cut at those shifts and nowhere else.</summary>
+    static void ChangePointFindsPlantedShifts()
+    {
+        var series = new System.Collections.Generic.List<double>();
+        for (var i = 0; i < 20; i++) series.Add(5);
+        for (var i = 0; i < 20; i++) series.Add(200);
+        for (var i = 0; i < 20; i++) series.Add(5);
+
+        var cuts = ChangePoint.Detect(series, ChangePoint.SuggestedPenalty(series), 3);
+        Check("finds both planted changepoints", cuts.Count == 2, "cuts at [" + Show(cuts) + "]");
+        if (cuts.Count == 2)
+        {
+            Check("first cut lands on the rise", Mathf.Abs(cuts[0] - 20) <= 1, "at " + cuts[0]);
+            Check("second cut lands on the fall", Mathf.Abs(cuts[1] - 40) <= 1, "at " + cuts[1]);
+        }
+
+        var flat = new System.Collections.Generic.List<double>();
+        for (var i = 0; i < 40; i++) flat.Add(42);
+        var none = ChangePoint.Detect(flat, ChangePoint.SuggestedPenalty(flat), 3);
+        Check("a flat series is not split", none.Count == 0, "cuts [" + Show(none) + "]");
+
+        var tiny = new System.Collections.Generic.List<double> { 1, 2 };
+        Check("too short to split returns nothing",
+            ChangePoint.Detect(tiny, 1d, 3).Count == 0);
+        Check("empty input does not throw",
+            ChangePoint.Detect(new System.Collections.Generic.List<double>(), 1d).Count == 0);
+    }
+
+    /// <summary>
+    /// PELT claims its pruning is exact, not a heuristic. The only way to know is to run the same
+    /// optimisation without pruning and require an identical answer.
+    /// </summary>
+    static void PruningMatchesTheExhaustiveOptimum()
+    {
+        var rng = new System.Random(2024);
+        var mismatches = 0;
+        var trials = 40;
+
+        for (var t = 0; t < trials; t++)
+        {
+            var n = 30 + rng.Next(0, 40);
+            var series = new System.Collections.Generic.List<double>();
+            var level = rng.Next(0, 100);
+            for (var i = 0; i < n; i++)
+            {
+                // Shift the level now and then, and add noise, so the search has real work to do.
+                if (rng.NextDouble() < 0.08)
+                    level = rng.Next(0, 300);
+                series.Add(level + rng.NextDouble() * 20 - 10);
+            }
+
+            var penalty = ChangePoint.SuggestedPenalty(series);
+            var pelt = ChangePoint.Detect(series, penalty, 2);
+            var exact = ChangePoint.DetectExhaustive(series, penalty, 2);
+            if (Show(pelt) != Show(exact))
+            {
+                mismatches++;
+                if (mismatches == 1)
+                    Debug.Log($"SELFTEST   first mismatch n={n} pelt=[{Show(pelt)}] exact=[{Show(exact)}]");
+            }
+        }
+
+        Check("pruned PELT equals the unpruned optimum", mismatches == 0,
+            $"{trials - mismatches}/{trials} identical");
+    }
+
+    /// <summary>A day with one clear working block should come back as one session.</summary>
+    static void SessionsFollowTheDaysShape()
+    {
+        File.Delete(ActivityLog.FilePath);
+        var log = new ActivityLog();
+
+        // 10:00 to 12:00 busy, then quiet. Written straight into the file so the times are exact.
+        var day = DateTime.Now.Date;
+        var buckets = new System.Collections.Generic.List<string>();
+        for (var slot = 0; slot < 288; slot++)
+        {
+            var local = day.AddSeconds(slot * ActivityLog.BucketSeconds);
+            var busy = local.Hour >= 10 && local.Hour < 12;
+            if (!busy)
+                continue;
+            var unix = new DateTimeOffset(local).ToUnixTimeSeconds();
+            buckets.Add($"{{\"startUnix\":{unix},\"inputs\":300,\"apps\":[\"Code\"]," +
+                        "\"titles\":[\"\"],\"appSeconds\":[290],\"appInputs\":[300]}");
+        }
+
+        File.WriteAllText(ActivityLog.FilePath,
+            "{\"version\":1,\"buckets\":[" + string.Join(",", buckets) + "]}");
+
+        var reloaded = ActivityLog.Load();
+        var sessions = reloaded.Sessions(day);
+        Check("one busy block gives one session", sessions.Count == 1, $"got {sessions.Count}");
+        if (sessions.Count == 1)
+        {
+            var length = sessions[0].End - sessions[0].Start;
+            Check("session covers about two hours",
+                Mathf.Abs((float)length.TotalMinutes - 120f) <= 20f,
+                $"{length.TotalMinutes:0} minutes, {sessions[0].Start:HH:mm} to {sessions[0].End:HH:mm}");
+        }
+
+        File.Delete(ActivityLog.FilePath);
     }
 }
