@@ -64,6 +64,9 @@ namespace DeskPond
         /// <summary>Distinct windows tracked per bucket before extra ones collapse to app only.</summary>
         const int MaxEntriesPerBucket = 24;
 
+        /// <summary>Shortest run a segment may be, so the day is not diced into single slices.</summary>
+        const int MinSessionSlots = 3;
+
         const string FileName = "activity.json";
         const float FlushIntervalSeconds = 60f;
 
@@ -414,46 +417,97 @@ namespace DeskPond
         }
 
         /// <summary>
-        /// Splits the day into stretches of work. A bucket counts as active above a threshold, and
-        /// short gaps are absorbed rather than ending a stretch, otherwise pausing to read
-        /// something would chop one afternoon into a dozen fragments.
+        /// The day as one value per five minute slot, zero where nothing was recorded. Changepoint
+        /// detection needs an evenly spaced series, so gaps have to be filled rather than skipped.
         /// </summary>
-        public List<(DateTime Start, DateTime End)> Sessions(DateTime localDay,
-            int activeInputs = 20, int gapBuckets = 2)
+        public double[] DaySeries(DateTime localDay)
         {
-            var sessions = new List<(DateTime, DateTime)>();
+            var slots = 86400 / BucketSeconds;
+            var series = new double[slots];
             var dayStart = localDay.Date;
-            var active = new List<DateTime>();
 
             foreach (var bucket in _file.buckets)
             {
                 var local = DateTimeOffset.FromUnixTimeSeconds(bucket.startUnix).LocalDateTime;
-                if (local.Date == dayStart && bucket.inputs >= activeInputs)
-                    active.Add(local);
+                if (local.Date != dayStart)
+                    continue;
+                var slot = (int)(local.TimeOfDay.TotalSeconds / BucketSeconds);
+                if (slot >= 0 && slot < slots)
+                    series[slot] += bucket.inputs;
             }
 
-            active.Sort();
-            if (active.Count == 0)
+            var open = DateTimeOffset.FromUnixTimeSeconds(_bucketStart).LocalDateTime;
+            if (open.Date == dayStart)
+            {
+                var slot = (int)(open.TimeOfDay.TotalSeconds / BucketSeconds);
+                if (slot >= 0 && slot < slots)
+                    series[slot] += _bucketInputs;
+            }
+
+            return series;
+        }
+
+        /// <summary>
+        /// Splits the day into stretches of work.
+        ///
+        /// The boundaries come from changepoint detection rather than a fixed threshold, so each
+        /// person is measured against their own baseline: a steady slow worker never crosses a
+        /// global cut-off, and one burst of clicking crosses it without being work. A segment
+        /// counts as focus when its own mean clears a fraction of the day's busiest segment.
+        /// </summary>
+        public List<(DateTime Start, DateTime End)> Sessions(DateTime localDay,
+            double focusFraction = 0.25, double penaltyStrength = 2d)
+        {
+            var sessions = new List<(DateTime, DateTime)>();
+            var series = DaySeries(localDay);
+            var dayStart = localDay.Date;
+
+            var penalty = ChangePoint.SuggestedPenalty(series, penaltyStrength);
+            var cuts = ChangePoint.Detect(series, penalty, MinSessionSlots);
+
+            // Turn the cut points into [start, end) index ranges.
+            var bounds = new List<int> { 0 };
+            bounds.AddRange(cuts);
+            bounds.Add(series.Length);
+
+            var means = new double[bounds.Count - 1];
+            var busiest = 0d;
+            for (var i = 0; i < means.Length; i++)
+            {
+                var total = 0d;
+                for (var j = bounds[i]; j < bounds[i + 1]; j++)
+                    total += series[j];
+                means[i] = total / Math.Max(1, bounds[i + 1] - bounds[i]);
+                if (means[i] > busiest)
+                    busiest = means[i];
+            }
+
+            if (busiest <= 0d)
                 return sessions;
 
-            var start = active[0];
-            var last = active[0];
-            var slack = TimeSpan.FromSeconds((gapBuckets + 1) * BucketSeconds);
+            var floor = busiest * Math.Clamp(focusFraction, 0.05d, 0.9d);
 
-            for (var i = 1; i < active.Count; i++)
+            // Adjacent focus segments describe one stretch of work, so they are merged.
+            var runStart = -1;
+            for (var i = 0; i < means.Length; i++)
             {
-                if (active[i] - last <= slack)
+                var focus = means[i] >= floor;
+                if (focus && runStart < 0)
+                    runStart = bounds[i];
+                if (!focus && runStart >= 0)
                 {
-                    last = active[i];
-                    continue;
+                    sessions.Add((dayStart.AddSeconds(runStart * BucketSeconds),
+                        dayStart.AddSeconds(bounds[i] * BucketSeconds)));
+                    runStart = -1;
                 }
-
-                sessions.Add((start, last.AddSeconds(BucketSeconds)));
-                start = active[i];
-                last = active[i];
             }
 
-            sessions.Add((start, last.AddSeconds(BucketSeconds)));
+            if (runStart >= 0)
+            {
+                sessions.Add((dayStart.AddSeconds(runStart * BucketSeconds),
+                    dayStart.AddSeconds(bounds[means.Length] * BucketSeconds)));
+            }
+
             return sessions;
         }
     }
