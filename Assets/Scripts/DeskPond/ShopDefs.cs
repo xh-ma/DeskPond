@@ -79,13 +79,22 @@ namespace DeskPond
             }
         }
 
-        public static string Effect(UpgradeKind kind, int level)
+        /// <summary>
+        /// Describes what a tier does. Pass the configured minutes per fish when adaptive pacing
+        /// is on: it prices a fish in minutes of work, so quoting a fixed input range would
+        /// advertise a number the game no longer uses.
+        /// </summary>
+        public static string Effect(UpgradeKind kind, int level, float adaptiveMinutes = 0f)
         {
             switch (kind)
             {
                 case UpgradeKind.Basket: return "holds " + Capacity(level);
                 case UpgradeKind.Lure: return FishPrice(level) + "c per fish";
-                default: return "bite every " + MinInputs(level) + "-" + MaxInputs(level);
+                default:
+                    if (adaptiveMinutes > 0f)
+                        return "bite every " +
+                               (adaptiveMinutes * RodFactor(level)).ToString("0.#") + " min";
+                    return "bite every " + MinInputs(level) + "-" + MaxInputs(level);
             }
         }
 
