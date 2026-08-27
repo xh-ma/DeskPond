@@ -101,6 +101,11 @@ namespace DeskPond
         public int targetFrameRate = 30;
 
         [Header("Pet")]
+        [Range(-0.6f, 0.6f)]
+        [Tooltip("Nudges the pet up or down after it is seated on the waterline. 0 rests its feet " +
+                 "exactly on the taskbar's top edge; negative sinks it slightly into the water.")]
+        public float petSeatOffset = -0.06f;
+
         [Range(1f, 8f)]
         [Tooltip("On-screen magnification of the pet. 3 = each sprite pixel covers 3x3 screen pixels.")]
         public float petZoom = 3f;

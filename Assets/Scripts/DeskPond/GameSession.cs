@@ -13,6 +13,9 @@ namespace DeskPond
         [SerializeField] Camera worldCamera;
         [SerializeField] float waterSurfaceY = -5.05f;
 
+        /// <summary>Where the water sits in world space; DesktopWindow maps it to the taskbar.</summary>
+        const float WaterlineY = -5.04f;
+
         SaveData _save;
         GameHud _hud;
         BasketMenu _menu;
@@ -113,6 +116,8 @@ namespace DeskPond
             }
             if (basket != null)
                 basket.Bind(basket.GetComponent<SpriteRenderer>(), basket.transform.Find("FullCue"));
+
+            SeatOnWaterline();
 
             _save = SaveSystem.LoadOrCreate();
             ClampBasket();
@@ -247,6 +252,63 @@ namespace DeskPond
             _input = FindFirstObjectByType<GlobalInputCounter>();
             if (_input == null)
                 _input = GlobalInputCounter.Create();
+        }
+
+        /// <summary>
+        /// Drops the pet so its feet rest on the waterline rather than floating above it. The lift
+        /// is measured from the sprite bounds, so new art stays seated without editing the scene.
+        ///
+        /// Runs before PetDragger is created, which caches the pet's resting height on bind.
+        /// </summary>
+        void SeatOnWaterline()
+        {
+            var offset = config != null ? config.petSeatOffset : 0f;
+            Seat(cat != null ? cat.GetComponent<SpriteRenderer>() : null, offset);
+            Seat(basket != null ? basket.GetComponent<SpriteRenderer>() : null, offset);
+        }
+
+        static void Seat(SpriteRenderer sprite, float offset)
+        {
+            if (sprite == null || sprite.sprite == null)
+                return;
+
+            var t = sprite.transform;
+            // sprite.bounds is world space and already includes scale, but it measures the sprite
+            // rect. Art usually carries a row or two of empty pixels underneath, which would leave
+            // the pet visibly hovering, so the padding is measured and taken off.
+            var artBottom = sprite.bounds.min.y + EmptyRowsBelow(sprite.sprite)
+                            / sprite.sprite.pixelsPerUnit * Mathf.Abs(t.lossyScale.y);
+            var lift = WaterlineY + offset - artBottom;
+            t.position = new Vector3(t.position.x, t.position.y + lift, t.position.z);
+        }
+
+        /// <summary>
+        /// Transparent rows between the artwork and the bottom of the sprite rect. Returns 0 when
+        /// the texture cannot be read, which just falls back to seating by the rect.
+        /// </summary>
+        static int EmptyRowsBelow(Sprite sprite)
+        {
+            var texture = sprite.texture;
+            if (texture == null || !texture.isReadable)
+                return 0;
+
+            var rect = sprite.textureRect;
+            var w = Mathf.RoundToInt(rect.width);
+            var h = Mathf.RoundToInt(rect.height);
+            if (w <= 0 || h <= 0)
+                return 0;
+
+            var pixels = texture.GetPixels(Mathf.RoundToInt(rect.x), Mathf.RoundToInt(rect.y), w, h);
+            for (var row = 0; row < h; row++)
+            {
+                for (var col = 0; col < w; col++)
+                {
+                    if (pixels[row * w + col].a > 0.01f)
+                        return row;
+                }
+            }
+
+            return 0;
         }
 
         /// <summary>Folds this frame's counted clicks and keystrokes into progress toward a bite.</summary>
