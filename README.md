@@ -18,16 +18,37 @@ working normally.
 Fish come from clicks and keystrokes, counted system-wide, or from sitting idle. A
 long enough idle stretch also sends a gift box drifting over with a free skin.
 
+How much work a fish costs is set from your own pace rather than a fixed number, so a
+fast typist and a slow one wait a comparable number of minutes for a bite.
+
 ## Playing
 
 - **Drag the cat** to slide the pet along the taskbar.
 - **Click the basket** to sell your catch, buy upgrades and pick skins.
 - **Click a gift box** once it parks beside the cat.
+- **Click `stats`** in the panel for where the day went.
 - **Quit** from the taskbar button, or the `quit` button in the panel.
 
 ![The shop panel](docs/shot_panel.png)
 
 ![Cat skins](docs/skins.png)
+
+## Activity
+
+![The activity panel](docs/shot_stats.png)
+
+The activity panel shows today hour by hour, which applications took the time, and how
+many clicks and keystrokes went into each. Application icons and names come from the
+executables themselves. The `sites` button turns window titles on, which is what lets
+the list name pages and documents instead of just the program; see Privacy below.
+
+Pacing reads the same signal. DeskPond keeps a running estimate of your median input
+rate, one sample per active minute, and prices the next fish at roughly five minutes of
+work at that rate. The estimate uses the P-square algorithm, which tracks a quantile
+with five markers instead of the whole history, so it costs a fixed 132 bytes however
+long the program runs. Idle minutes are skipped, or stepping away would drag the median
+toward zero and make fish nearly free on return. It takes twelve active minutes to warm
+up; until then a fixed range applies.
 
 ## Privacy
 
