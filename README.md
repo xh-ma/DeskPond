@@ -38,7 +38,9 @@ fast typist and a slow one wait a comparable number of minutes for a bite.
 ![The activity panel](docs/shot_stats.png)
 
 The activity panel shows today hour by hour, which applications took the time, and how
-many clicks and keystrokes went into each. Application icons and names come from the
+many clicks and keystrokes went into each. Work stretches are found with changepoint
+detection (PELT) rather than a fixed busy/idle threshold, so the boundaries come from
+where your own pace actually shifts. Application icons and names come from the
 executables themselves. The `sites` button turns window titles on, which is what lets
 the list name pages and documents instead of just the program; see Privacy below.
 
