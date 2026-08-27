@@ -69,6 +69,11 @@ namespace DeskPond
             zoom = config.petZoom;
             waterColor = config.waterColor;
             waterRimThickness = config.waterRimThickness;
+
+            // A desktop pet sits on screen all day, so it has no business rendering flat out.
+            // QualitySettings ships with vSync off, which leaves the frame rate uncapped unless
+            // something sets this.
+            Application.targetFrameRate = Mathf.Clamp(config.targetFrameRate, 10, 144);
         }
 
         IntPtr _hwnd = IntPtr.Zero;
