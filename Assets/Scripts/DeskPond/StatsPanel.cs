@@ -45,6 +45,8 @@ namespace DeskPond
         const int AppRows = 6;
         const int ChartHours = 24;
         const float ChartH = 46f;
+        const float BandH = 6f;
+        const int MaxSessionBars = 10;
         const float RowH = 26f;
         const float IconSize = 16f;
 
@@ -69,6 +71,11 @@ namespace DeskPond
         readonly List<RectTransform> _hourBars = new List<RectTransform>();
         readonly List<Image> _hourFills = new List<Image>();
         readonly List<AppRow> _appRows = new List<AppRow>();
+        readonly List<RectTransform> _sessionBars = new List<RectTransform>();
+
+        // The chart's drawing area, so the bands below it share the same 24 hour scale.
+        float _chartOriginX;
+        float _chartWidth;
 
         Text _summary;
         Text _counts;
@@ -387,6 +394,8 @@ namespace DeskPond
 
                 foreach (var bar in _hourBars)
                     bar.sizeDelta = new Vector2(bar.sizeDelta.x, 0f);
+                foreach (var band in _sessionBars)
+                    band.sizeDelta = new Vector2(0f, BandH);
                 RefreshPacing();
                 return;
             }
@@ -439,10 +448,41 @@ namespace DeskPond
                     longest = span;
             }
 
+            PlaceSessionBands(sessions);
+
             _summary.text = total <= 0
                 ? "Nothing recorded yet today."
                 : $"{Duration(active.TotalSeconds)} active  ·  {sessions.Count} " +
                   $"stretch{(sessions.Count == 1 ? "" : "es")}  ·  longest {Duration(longest.TotalSeconds)}";
+        }
+
+        /// <summary>
+        /// Draws each detected stretch as a bar spanning the hours it covers, on the same 24 hour
+        /// scale as the chart above it.
+        /// </summary>
+        void PlaceSessionBands(List<(DateTime Start, DateTime End)> sessions)
+        {
+            for (var i = 0; i < _sessionBars.Count; i++)
+            {
+                var rt = _sessionBars[i];
+                if (i >= sessions.Count)
+                {
+                    rt.sizeDelta = new Vector2(0f, BandH);
+                    continue;
+                }
+
+                var start = sessions[i].Start.TimeOfDay.TotalHours / 24d;
+                var end = sessions[i].End.TimeOfDay.TotalHours / 24d;
+                // A stretch running to midnight reports an end of zero hours, not twenty four.
+                if (end <= start)
+                    end = 1d;
+
+                // Short stretches still get a sliver rather than disappearing.
+                var w = Mathf.Max(2f, (float)((end - start) * _chartWidth));
+                rt.sizeDelta = new Vector2(w, BandH);
+                rt.anchoredPosition = new Vector2(
+                    _chartOriginX + (float)(start * _chartWidth), rt.anchoredPosition.y);
+            }
         }
 
         void RefreshApps(ActivityLog log)
@@ -699,7 +739,30 @@ namespace DeskPond
                 _hourFills.Add(bar);
             }
 
-            y -= ChartH + 10f;
+            y -= ChartH + 8f;
+
+            // A strip under the chart marking the stretches changepoint detection picked out, so
+            // the segmentation is visible instead of being three numbers in a summary line.
+            _chartOriginX = pad;
+            _chartWidth = content;
+
+            var bandTrack = AddSurface(_panel, "BandTrack", UiKit.FieldFace, false);
+            Place(bandTrack.rectTransform, new Rect(pad, y, content, BandH + 4f));
+
+            for (var i = 0; i < MaxSessionBars; i++)
+            {
+                var band = AddImage(_panel, "Band" + i, UiKit.White, UiKit.ChartPeak);
+                band.type = Image.Type.Simple;
+                var rt = band.rectTransform;
+                rt.anchorMin = new Vector2(0f, 1f);
+                rt.anchorMax = new Vector2(0f, 1f);
+                rt.pivot = new Vector2(0f, 1f);
+                rt.anchoredPosition = new Vector2(pad, y - 2f);
+                rt.sizeDelta = new Vector2(0f, BandH);
+                _sessionBars.Add(rt);
+            }
+
+            y -= BandH + 8f;
 
             foreach (var mark in new[] { 0, 6, 12, 18 })
             {
