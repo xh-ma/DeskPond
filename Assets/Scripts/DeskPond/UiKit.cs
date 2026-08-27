@@ -28,6 +28,10 @@ namespace DeskPond
         public static readonly Color SellFace = Hex(0x93B383);
         public static readonly Color QuitFace = Hex(0xC79191);
 
+        public static readonly Color ChartBar = Hex(0x7A9CC6);
+        public static readonly Color ChartPeak = Hex(0x40699E);
+        public static readonly Color ChartTrack = Hex(0xBDB9AC);
+
         public static readonly Color TextDark = Hex(0x1A1A18);
         public static readonly Color TextMuted = Hex(0x55524A);
         public static readonly Color TextOnHeader = Hex(0x14140F);
@@ -127,6 +131,29 @@ namespace DeskPond
         }
 
         public static Sprite GiftSprite() => _gift != null ? _gift : _gift = BuildGift();
+
+        static Sprite _white;
+
+        /// <summary>
+        /// A plain white pixel for chart bars and dividers.
+        ///
+        /// This is the one place where setting Image.color is right rather than wrong: the source
+        /// is pure white, so the multiply reproduces the tint exactly. Everything with a bevel
+        /// still needs its colour baked, because there a multiply would dirty the highlight.
+        /// </summary>
+        public static Sprite White
+        {
+            get
+            {
+                if (_white != null)
+                    return _white;
+                var tex = NewTex(1, 1);
+                tex.SetPixels(new[] { Color.white });
+                tex.Apply(false, false);
+                _white = Sprite.Create(tex, new Rect(0f, 0f, 1f, 1f), new Vector2(0.5f, 0.5f), 1f);
+                return _white;
+            }
+        }
 
         static Sprite Get(Color face, bool raised)
         {
