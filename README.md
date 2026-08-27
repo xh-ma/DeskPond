@@ -31,16 +31,29 @@ long enough idle stretch also sends a gift box drifting over with a free skin.
 
 ## Privacy
 
-DeskPond installs a system-wide input hook to count how busy you are. It is a counter,
-not a key logger.
+Nothing DeskPond records ever leaves your machine. It makes no network requests at
+all. Everything below is written to two files in your local app data folder, and
+deleting them costs you nothing but statistics.
 
-The keyboard hook reads only the message id saying that a key went down. It never
-reads which key, so that information is not available to the program at any point.
-Nothing about your input is stored or sent anywhere; the save file holds a running
-total and nothing else.
+**Input is counted, not read.** DeskPond installs a system-wide input hook to tell how
+busy you are. The keyboard hook reads only the message id saying that a key went down.
+It never reads which key, so that information is not available to the program at any
+point. The code is `Assets/Scripts/DeskPond/GlobalInputCounter.cs`, short enough to
+read in a minute.
 
-The code is `Assets/Scripts/DeskPond/GlobalInputCounter.cs`, short enough to read in
-a minute.
+**Activity is logged locally.** To pace fish against your own working rhythm and to show
+where your time went, DeskPond records five minute slices of how much input happened and
+which applications were in front. Process names only, kept for 30 days.
+
+**Window titles are off by default.** A title says far more than a process name does:
+document names, page titles, who you were talking to. Without them the panel can tell you
+that you spent two hours in a browser, but not which sites. Turn them on with the
+`sites` button in the activity panel; the choice is stored per player, so a build you hand
+to someone else still starts with it off. Turning it back off stops recording and deletes
+the titles already captured, and they expire after 7 days regardless.
+
+Set `trackActivity` to false to record nothing at all. `activity.json` sits next to
+`save.json` and can be deleted at any time; the game does not need it.
 
 ## Building
 
