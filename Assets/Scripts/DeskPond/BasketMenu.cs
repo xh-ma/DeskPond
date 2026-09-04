@@ -319,6 +319,15 @@ namespace DeskPond
                 _panel.anchoredPosition = _screenPos / _scale;
         }
 
+        /// <summary>Pulls the panel back onto the screen, for when the display shrinks.</summary>
+        public void ClampIntoScreen()
+        {
+            if (!IsOpen)
+                return;
+            ClampToScreen();
+            ApplyTransform();
+        }
+
         void ClampToScreen()
         {
             var halfW = _width * _scale * 0.5f;
