@@ -77,6 +77,16 @@ namespace DeskPond
                 box.size = sr.sprite.bounds.size;
         }
 
+        /// <summary>Re-places the pet for the current screen, after the display changes.</summary>
+        public void ReapplyForScreen()
+        {
+            if (_petRoot == null || _camera == null)
+                return;
+            RestorePosition();
+            _petRoot.position = ClampToView(_petRoot.position);
+            _homeY = _petRoot.position.y;
+        }
+
         void RestorePosition()
         {
             if (_session == null || _session.Save == null || _camera == null)
