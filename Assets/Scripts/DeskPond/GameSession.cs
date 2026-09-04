@@ -145,6 +145,7 @@ namespace DeskPond
             _window = DesktopWindow.Create();
             _window.ApplyConfig(config);
             _window.HitTest = ScreenPointInteractive;
+            _window.DisplayChanged += OnDisplayChanged;
             _dragger = FindFirstObjectByType<PetDragger>();
             if (_dragger == null && cat != null && basket != null)
                 _dragger = PetDragger.Create(this, cat.transform, basket.transform, worldCamera);
@@ -207,6 +208,18 @@ namespace DeskPond
                 Persist();
         }
 
+        /// <summary>
+        /// A new monitor, resolution or taskbar means every screen-derived position is stale: the
+        /// pet's spot along the water, and both panels, which are stored in screen pixels and can
+        /// land off a smaller display.
+        /// </summary>
+        void OnDisplayChanged()
+        {
+            _dragger?.ReapplyForScreen();
+            _menu?.ClampIntoScreen();
+            _stats?.ClampIntoScreen();
+        }
+
         void OnApplicationQuit()
         {
             Persist();
@@ -215,6 +228,8 @@ namespace DeskPond
 
         void OnDestroy()
         {
+            if (_window != null)
+                _window.DisplayChanged -= OnDisplayChanged;
             if (_dirty)
                 Persist();
             CommitActivity();
