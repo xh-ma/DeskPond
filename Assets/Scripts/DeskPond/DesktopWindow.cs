@@ -76,6 +76,18 @@ namespace DeskPond
             Application.targetFrameRate = Mathf.Clamp(config.targetFrameRate, 10, 144);
         }
 
+        /// <summary>
+        /// Raised after the overlay has re-laid itself out for a new screen, so anything holding
+        /// screen-derived positions can fix them up.
+        /// </summary>
+        public event System.Action DisplayChanged;
+
+        // Everything here is derived from the screen, so a change to any of it invalidates the lot.
+        int _lastScreenW;
+        int _lastScreenH;
+        int _lastTaskbarPx;
+        float _displayPoll;
+
         IntPtr _hwnd = IntPtr.Zero;
         bool _clickThrough;
         bool _active;
@@ -302,6 +314,43 @@ namespace DeskPond
 
             SetClickThrough(!over);
             PointerOverPet = false;
+
+            TickDisplayWatch(Time.unscaledDeltaTime);
+        }
+
+        /// <summary>
+        /// The screen can change under a running overlay: a monitor is plugged in or unplugged,
+        /// the resolution or scaling changes, or the taskbar is resized or moved to another edge.
+        /// The camera, the waterline and the window size are all measured from the screen, so they
+        /// are recomputed rather than trusted from startup.
+        ///
+        /// Polled on a timer instead of every frame because reading the work area is a system call.
+        /// </summary>
+        void TickDisplayWatch(float dt)
+        {
+            _displayPoll -= dt;
+            if (_displayPoll > 0f)
+                return;
+            _displayPoll = 0.5f;
+
+            var taskbar = ReadTaskbarHeight();
+            if (Screen.width == _lastScreenW && Screen.height == _lastScreenH
+                && taskbar == _lastTaskbarPx)
+                return;
+
+            var first = _lastScreenW == 0;
+            _lastScreenW = Screen.width;
+            _lastScreenH = Screen.height;
+            _lastTaskbarPx = taskbar;
+
+            // Start() already sized and laid out; only react to later changes.
+            if (first)
+                return;
+
+            Debug.Log($"DeskPond display changed: {Screen.width}x{Screen.height} taskbar={taskbar}px");
+            ResizeToScreen();
+            LayoutCamera();
+            DisplayChanged?.Invoke();
         }
 
         static bool ReadPrimaryDown()
@@ -333,6 +382,18 @@ namespace DeskPond
 #endif
         }
 
+        /// <summary>Stretches the overlay across the whole primary display.</summary>
+        void ResizeToScreen()
+        {
+#if UNITY_STANDALONE_WIN && !UNITY_EDITOR
+            if (_hwnd == IntPtr.Zero)
+                return;
+            var res = Screen.currentResolution;
+            SetWindowPos(_hwnd, HWND_TOPMOST, 0, 0, res.width, res.height,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW);
+#endif
+        }
+
 #if UNITY_STANDALONE_WIN && !UNITY_EDITOR
         void Apply()
         {
@@ -346,8 +407,7 @@ namespace DeskPond
                 SetWindowLong(_hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
                 SetWindowLong(_hwnd, GWL_EXSTYLE, BaseExStyle);
                 DwmExtendFrameIntoClientArea(_hwnd, ref margins);
-                SetWindowPos(_hwnd, HWND_TOPMOST, 0, 0, Screen.currentResolution.width,
-                    Screen.currentResolution.height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                ResizeToScreen();
                 _active = true;
                 _clickThrough = false;
             }
