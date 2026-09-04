@@ -38,6 +38,13 @@ namespace DeskPond
         float _frameClock;
 
         float _catchSeconds = 1.6f;
+
+        // Where the cat rests between hops. Held as a field because a hop that is interrupted
+        // leaves the transform part way up its arc, and reading it back then would treat that
+        // raised spot as ground level.
+        Vector3 _restLocalPos;
+        Quaternion _restLocalRot = Quaternion.identity;
+        bool _restCaptured;
         float _catchHop = 0.16f;
         float _catchLean = 7f;
         Coroutine _catchRoutine;
@@ -86,7 +93,7 @@ namespace DeskPond
                 {
                     StopCoroutine(_catchRoutine);
                     _catchRoutine = null;
-                    transform.localRotation = Quaternion.identity;
+                    RestoreRest();
                 }
             }
 
@@ -261,16 +268,43 @@ namespace DeskPond
         void PlayCatchHop()
         {
             if (_catchRoutine != null)
+            {
+                // Put the cat back down before measuring again, or the interrupted arc becomes
+                // the new resting height and every catch leaves it a little further up.
                 StopCoroutine(_catchRoutine);
+                _catchRoutine = null;
+                RestoreRest();
+            }
+
+            CaptureRest();
             _catchRoutine = StartCoroutine(CatchHopRoutine());
+        }
+
+        /// <summary>
+        /// Records the resting pose the first time a hop runs. PetDragger reparents the cat after
+        /// Bind, which rewrites localPosition, so this cannot be done at Bind time.
+        /// </summary>
+        void CaptureRest()
+        {
+            if (_restCaptured)
+                return;
+            _restLocalPos = transform.localPosition;
+            _restLocalRot = transform.localRotation;
+            _restCaptured = true;
+        }
+
+        void RestoreRest()
+        {
+            if (!_restCaptured)
+                return;
+            transform.localPosition = _restLocalPos;
+            transform.localRotation = _restLocalRot;
         }
 
         System.Collections.IEnumerator CatchHopRoutine()
         {
-            // Captured here rather than at Bind: PetDragger reparents the cat after Bind runs,
-            // which rewrites localPosition.
-            var basePos = transform.localPosition;
-            var baseRot = transform.localRotation;
+            var basePos = _restLocalPos;
+            var baseRot = _restLocalRot;
 
             for (var t = 0f; t < _catchSeconds; t += Time.deltaTime)
             {
@@ -288,8 +322,7 @@ namespace DeskPond
                 yield return null;
             }
 
-            transform.localPosition = basePos;
-            transform.localRotation = baseRot;
+            RestoreRest();
             _catchRoutine = null;
         }
 
