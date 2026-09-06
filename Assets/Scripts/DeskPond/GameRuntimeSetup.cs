@@ -101,7 +101,7 @@ namespace DeskPond
         {
 #if UNITY_EDITOR
             var sprite = UnityEditor.AssetDatabase
-                .LoadAssetAtPath<Sprite>("Assets/Art/Placeholders/basket.png");
+                .LoadAssetAtPath<Sprite>("Assets/Art/Sprites/basket.png");
             if (sprite != null)
                 return sprite;
 #endif

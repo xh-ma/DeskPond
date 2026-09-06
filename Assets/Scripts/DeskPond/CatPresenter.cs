@@ -256,7 +256,7 @@ namespace DeskPond
             _sprite.color = Color.white;
             _sprite.flipX = false;
 
-            // Drawn frames carry their own motion, so the hop is only for the static placeholder.
+            // Drawn frames carry their own motion, so the hop is only for the static sprite.
             if (_catchFrames == null)
                 PlayCatchHop();
         }
