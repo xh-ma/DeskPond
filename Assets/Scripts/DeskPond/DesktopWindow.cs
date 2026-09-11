@@ -88,6 +88,13 @@ namespace DeskPond
         int _lastTaskbarPx;
         float _displayPoll;
 
+        // Apply() needs a window handle, and GetActiveWindow returns nothing until the window is
+        // actually up. Launched without focus it can miss, which silently leaves the game as an
+        // ordinary decorated window instead of the overlay, so it is retried for a short while.
+        float _applyRetry;
+        int _applyAttempts;
+
+        bool _suppressOverlay;
         IntPtr _hwnd = IntPtr.Zero;
         bool _clickThrough;
         bool _active;
@@ -144,6 +151,7 @@ namespace DeskPond
             if (System.Array.IndexOf(System.Environment.GetCommandLineArgs(), "-nooverlay") >= 0)
             {
                 _active = false;
+                _suppressOverlay = true;
                 Debug.Log("DeskPond: -nooverlay, running as a normal window.");
                 LayoutCamera();
             }
@@ -293,6 +301,8 @@ namespace DeskPond
             // click-through, mouse messages go to whatever is underneath, so Unity's pointer state
             // freezes. Driving click-through from it deadlocks: the window stays transparent, so
             // Unity never sees the cursor arrive, so it never becomes clickable.
+            TickApplyRetry(Time.unscaledDeltaTime);
+
             CursorValid = TryGetCursor(out var cursor);
             if (CursorValid)
                 CursorScreen = cursor;
@@ -370,7 +380,29 @@ namespace DeskPond
 #if UNITY_STANDALONE_WIN && !UNITY_EDITOR
             if (!GetCursorPos(out var p))
                 return false;
-            // Win32 origin is top-left of the virtual desktop; Unity's is bottom-left of the window.
+
+            // GetCursorPos is in desktop coordinates; Unity's screen space is the window's client
+            // area, bottom-left origin. Converting through the client rect rather than assuming the
+            // two are the same rectangle is what keeps clicks landing on what they look like they
+            // are landing on: the moment the window is inset, decorated, or sized to anything other
+            // than the whole desktop, the difference becomes a constant offset on every hit test.
+            var local = p;
+            if (_hwnd != IntPtr.Zero && ScreenToClient(_hwnd, ref local)
+                && GetClientRect(_hwnd, out var client))
+            {
+                var w = client.Right - client.Left;
+                var h = client.Bottom - client.Top;
+                if (w > 0 && h > 0)
+                {
+                    // Scale rather than assume the two rectangles are the same size. They usually
+                    // are, and then this is the identity; when they are not, a fixed subtraction
+                    // would leave clicks landing a little off wherever the pointer is.
+                    screen = new Vector2(local.X * (float)Screen.width / w,
+                        (h - local.Y) * (float)Screen.height / h);
+                    return true;
+                }
+            }
+
             screen = new Vector2(p.X, Screen.height - p.Y);
             return true;
 #else
@@ -379,6 +411,32 @@ namespace DeskPond
                 return false;
             screen = mouse.position.ReadValue();
             return true;
+#endif
+        }
+
+        /// <summary>
+        /// Apply needs a window handle, and GetActiveWindow has nothing to give until the window
+        /// is really up. Launched without focus it can miss, which would silently leave the game
+        /// as an ordinary decorated window instead of the overlay, so it is retried briefly.
+        /// </summary>
+        void TickApplyRetry(float dt)
+        {
+#if UNITY_STANDALONE_WIN && !UNITY_EDITOR
+            if (_active || _suppressOverlay || _applyAttempts >= 20)
+                return;
+
+            _applyRetry -= dt;
+            if (_applyRetry > 0f)
+                return;
+
+            _applyRetry = 0.25f;
+            _applyAttempts++;
+            Apply();
+            if (_active)
+            {
+                Debug.Log($"DeskPond: overlay applied on attempt {_applyAttempts}.");
+                LayoutCamera();
+            }
 #endif
         }
 
@@ -408,6 +466,19 @@ namespace DeskPond
                 SetWindowLong(_hwnd, GWL_EXSTYLE, BaseExStyle);
                 DwmExtendFrameIntoClientArea(_hwnd, ref margins);
                 ResizeToScreen();
+
+                // Unity sized its surface for the decorated window it created, then the lines
+                // above stripped the decoration and stretched it, leaving Screen reporting the
+                // old smaller rectangle. Asking it to resync does not always take, so this is best
+                // effort: TryGetCursor scales between the two spaces either way.
+                if (GetClientRect(_hwnd, out var client))
+                {
+                    var w = client.Right - client.Left;
+                    var h = client.Bottom - client.Top;
+                    if (w > 0 && h > 0 && (w != Screen.width || h != Screen.height))
+                        Screen.SetResolution(w, h, FullScreenMode.Windowed);
+                }
+
                 _active = true;
                 _clickThrough = false;
             }
@@ -477,6 +548,17 @@ namespace DeskPond
 
         [DllImport("user32.dll")]
         static extern IntPtr GetActiveWindow();
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        static extern bool GetClientRect(IntPtr hwnd, out RECT rect);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        static extern bool ScreenToClient(IntPtr hwnd, ref PointNative point);
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct RECT { public int Left, Top, Right, Bottom; }
 
         [DllImport("user32.dll")]
         static extern int SetWindowLong(IntPtr hwnd, int index, uint newStyle);
