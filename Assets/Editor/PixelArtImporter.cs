@@ -29,9 +29,9 @@ public class PixelArtImporter : AssetPostprocessor
         importer.spritePixelsPerUnit = PixelsPerUnit;
         importer.textureCompression = TextureImporterCompression.Uncompressed;
 
-        // Palette-swap skins call GetPixels() on these textures at runtime, which needs the CPU
-        // copy kept around. These sprites are a few hundred bytes each, so the cost is nil.
-        importer.isReadable = true;
+        // Older loose sprites keep a CPU copy so seating code can measure their padding.
+        // The packed atlas is only ever drawn, never read back, so it skips the CPU copy.
+        importer.isReadable = !path.EndsWith("/Art/atlas.png");
 
         var settings = importer.GetDefaultPlatformTextureSettings();
         settings.format = TextureImporterFormat.RGBA32;

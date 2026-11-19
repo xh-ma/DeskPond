@@ -1,0 +1,95 @@
+boat_paper_back 81 269 24 17
+boat_paper_front 0 304 46 11
+boat_raft_back 43 316 2 1
+boat_raft_front 334 304 46 8
+boat_sail_back 97 0 78 40
+boat_sail_front 347 269 78 13
+boat_tub_back 471 304 28 5
+boat_tub_front 47 304 28 11
+bobber 398 304 7 8
+bobber_gold 406 304 7 8
+bucket_fill_full 381 304 16 8
+bucket_fill_half 0 316 12 4
+bucket_gold 466 269 14 13
+bucket_mint 481 269 14 13
+bucket_red 496 269 14 13
+bucket_tin 0 290 14 13
+bucket_wood 15 290 14 13
+cat_black 176 0 24 24 250,250,250,250,250,250,250,250,250
+cat_brown 0 119 24 24 250,250,250,250,250,250,250,250,250
+cat_calico 217 119 24 24 250,250,250,250,250,250,250,250,250
+cat_ginger 0 144 24 24 250,250,250,250,250,250,250,250,250
+cat_gold 217 144 24 24 250,250,250,250,250,250,250,250,250
+cat_gray 0 169 24 24 250,250,250,250,250,250,250,250,250
+cat_orange 217 169 24 24 250,250,250,250,250,250,250,250,250
+cat_pink 0 194 24 24 250,250,250,250,250,250,250,250,250
+cat_siamese 217 194 24 24 250,250,250,250,250,250,250,250,250
+cat_silver 0 219 24 24 250,250,250,250,250,250,250,250,250
+cat_snow 217 219 24 24 250,250,250,250,250,250,250,250,250
+cat_storm 0 244 24 24 250,250,250,250,250,250,250,250,250
+cat_tuxedo 217 244 24 24 250,250,250,250,250,250,250,250,250
+crow_fly 65 290 20 12 167,167
+fish_angel 161 269 17 15
+fish_bluegill 447 269 18 13
+fish_carp 426 269 20 13
+fish_catfish 147 290 22 12
+fish_cherry_salmon 193 290 21 12
+fish_cod 215 290 21 12
+fish_coelacanth 204 269 25 14
+fish_eel 133 304 26 10
+fish_golden_koi 230 269 23 14
+fish_goldfish 319 290 17 12
+fish_icefish 76 304 19 11
+fish_koi 259 290 20 12
+fish_loach 160 304 23 10
+fish_minnow 224 304 16 10
+fish_moon_carp 254 269 23 14
+fish_perch 280 290 19 12
+fish_puffer 278 269 17 14
+fish_salmon 170 290 22 12
+fish_shadow 35 316 7 3
+fish_sunfish 143 269 17 16
+fish_trout 237 290 21 12
+gift 0 269 20 20 200,200,200,200
+glasses_sun 18 316 16 3
+grip 55 290 9 13
+gull 106 269 18 16 333,333
+gull_fly 106 290 20 12 167,167
+hat_beanie 205 304 18 10
+hat_bow 500 304 9 5
+hat_can 435 304 10 7
+hat_captain 184 304 20 10
+hat_fish 446 304 16 6
+hat_flower 414 304 20 7
+hat_rain 296 304 22 9
+hat_straw 271 304 24 9
+heart 463 304 7 6
+icon_app 241 304 14 10
+icon_chart 382 290 12 12
+icon_cog 395 290 12 12
+icon_dex 408 290 12 12
+icon_dried 319 304 14 9
+icon_gift 421 290 12 12
+icon_lock 122 304 10 11
+icon_shop 434 290 12 12
+icon_tank 96 304 12 11
+icon_wardrobe 447 290 12 12
+junk_boot 296 269 14 14
+junk_bottle 336 269 10 14
+junk_can 44 290 10 13
+junk_chest 337 290 14 12
+junk_duck 352 290 14 12
+junk_floppy 30 290 13 13
+junk_ghost 179 269 13 15
+junk_keycap 109 304 12 11
+junk_pearl 367 290 14 12
+junk_sock 324 269 11 14
+junk_weed 311 269 12 14
+lantern 300 290 9 12 333,333
+lantern_off 460 290 9 12
+mail_bottle 193 269 10 15
+mark_bite 470 290 7 12
+mark_gold 478 290 7 12
+notebook 256 304 14 10
+tank_cabinet 0 0 96 118
+zz 13 316 4 4
