@@ -21,7 +21,7 @@ MonoBehaviour:
   idleThresholdSeconds: 3
   idleSecondsPerFish: 300
   waterColor: {r: 0.45, g: 0.72, b: 0.95, a: 1}
-  idleSecondsPerGift: 1800
+  giftEverySeconds: 3600
   giftDriftSeconds: 14
   popupOpenSeconds: 0.18
   welcomeGiftDelaySeconds: 5

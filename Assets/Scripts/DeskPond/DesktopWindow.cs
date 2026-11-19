@@ -5,139 +5,195 @@ using UnityEngine;
 namespace DeskPond
 {
     /// <summary>
-    /// Turns the player window into a fullscreen, always-on-top, transparent desktop overlay.
+    /// Turns the player window into a transparent, always-on-top, click-through desktop overlay,
+    /// and keeps it cheap.
     ///
-    /// The window covers the whole screen but is click-through everywhere except over the pet,
-    /// so the desktop underneath stays usable. Dragging moves the pet, never the window itself,
-    /// which avoids the jitter of moving an OS window every frame.
+    /// LAYOUT
+    /// The window is a thin band along the bottom of the primary screen, sitting on the pond's
+    /// floor: on top of a bottom taskbar, or on the screen edge when the taskbar is at the top,
+    /// at a side, or auto-hidden (see <see cref="TaskbarInfo"/>). It only grows to the full work
+    /// area while a panel is open. A band a few hundred pixels tall costs a fraction of what a
+    /// full-screen transparent window does to render and composite.
     ///
-    /// Windows player only. In the editor this does nothing, so transparency and click-through
-    /// can only be tested in a build.
+    /// World space: one unit is 16 art pixels, x = 0 is the window's left edge and y = 0 is the
+    /// floor (the window's bottom edge). The camera is fitted so one art pixel is exactly
+    /// <see cref="Zoom"/> screen pixels.
+    ///
+    /// COST
+    /// - 12 fps while nothing is happening, 30 while the cursor is on the pet, a panel is open or
+    ///   something is animating fast (callers set <see cref="WantFast"/> each frame).
+    /// - While a fullscreen game or video is in front, the overlay hides itself, stops rendering
+    ///   and drops to 2 fps. It would otherwise sit on top of the game.
+    ///
+    /// Input never comes from Unity here: the overlay never takes focus and is click-through most
+    /// of the time, so cursor and button state are read from the OS.
     /// </summary>
     [DefaultExecutionOrder(-100)]
     public class DesktopWindow : MonoBehaviour
     {
-        const int GWL_STYLE = -16;
-        const int GWL_EXSTYLE = -20;
+        /// <summary>
+        /// Fixed window height in art pixels: room for the deepest pond plus the pet, and for the
+        /// panel. Fixed on purpose: resizing a Unity window rebuilds its surface and flashes.
+        /// </summary>
+        public const int WindowArtH = 212;
 
-        const uint WS_POPUP = 0x80000000;
-        const uint WS_VISIBLE = 0x10000000;
+        /// <summary>Window width around the pond when it is not full width, in art pixels.</summary>
+        const int LocalArtW = 320;
 
-        const int WS_EX_LAYERED = 0x00080000;
-        const int WS_EX_TRANSPARENT = 0x00000020;
-        const int WS_EX_TOPMOST = 0x00000008;
+        // Input and logic tick at 30 so hovering and clicking feel immediate, 60 while dragging so
+        // the pet keeps up with the cursor, but an idle pet only draws every third tick (10 fps).
+        const int TickFps = 30;
+        const int DragFps = 60;
+        const int IdleRenderInterval = 3;
+        const int HiddenFps = 2;
 
-        // WS_EX_APPWINDOW forces a taskbar button: a borderless WS_POPUP window gets none by
-        // default, which previously left no way to close the pet short of Task Manager.
-        // Right-clicking that button and choosing Close sends WM_CLOSE, so Unity shuts down
-        // cleanly and the save is written.
-        const int WS_EX_APPWINDOW = 0x00040000;
-
-        const int BaseExStyle = WS_EX_LAYERED | WS_EX_APPWINDOW | WS_EX_TOPMOST;
-
-        const uint SWP_NOSIZE = 0x0001;
-        const uint SWP_NOMOVE = 0x0002;
-        const uint SWP_NOACTIVATE = 0x0010;
-        const uint SWP_SHOWWINDOW = 0x0040;
-
-        static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+        bool _fullPond;
+        float _focusPx = -1f;
 
         [SerializeField] Camera worldCamera;
 
-        [Header("Layout")]
-        [Tooltip("Sprite pixels per world unit. Must match the sprites' import setting.")]
-        [SerializeField] float pixelsPerUnit = 16f;
+        GameConfig _config;
+        int _sizeStep;
+        int _zoom = 3;
 
-        [Tooltip("On-screen magnification. 2 = each sprite pixel covers 2x2 screen pixels.")]
-        [SerializeField] float zoom = 3f;
+        public static DesktopWindow Instance { get; private set; }
 
-        [Tooltip("World Y of the water surface the pet sits on.")]
-        [SerializeField] float waterlineWorldY = -5.04f;
+        public event Action DisplayChanged;
 
-        [Tooltip("Used when the real taskbar height cannot be read from the OS.")]
-        [SerializeField] int fallbackTaskbarPx = 48;
+        /// <summary>Screen pixels per art pixel.</summary>
+        public int Zoom => _zoom;
 
-        [Header("Water (pushed from GameConfig)")]
-        [SerializeField] Color waterColor = new Color(0.45f, 0.72f, 0.95f);
-        [SerializeField] float waterRimThickness = 0.08f;
+        public TaskbarInfo Taskbar { get; private set; }
 
-        /// <summary>Applied by GameSession before this component's Start runs.</summary>
-        public void ApplyConfig(GameConfig config)
+        /// <summary>Set every frame by anything animating fast or under the cursor: draw every tick.</summary>
+        public bool WantFast { get; set; }
+
+        /// <summary>Set every frame while something follows the cursor (dragging): tick at 60.</summary>
+        public bool WantSmooth { get; set; }
+
+        /// <summary>WantFast with a name, so -perflog can say who keeps the frame rate up.</summary>
+        public void Fast(string who)
         {
-            if (config == null)
-                return;
-            zoom = config.petZoom;
-            waterColor = config.waterColor;
-            waterRimThickness = config.waterRimThickness;
-
-            // A desktop pet sits on screen all day, so it has no business rendering flat out.
-            // QualitySettings ships with vSync off, which leaves the frame rate uncapped unless
-            // something sets this.
-            Application.targetFrameRate = Mathf.Clamp(config.targetFrameRate, 10, 144);
+            WantFast = true;
+            if (_perfLog)
+                _fastBy = who;
         }
 
-        /// <summary>
-        /// Raised after the overlay has re-laid itself out for a new screen, so anything holding
-        /// screen-derived positions can fix them up.
-        /// </summary>
-        public event System.Action DisplayChanged;
+        static readonly bool _perfLog = Array.IndexOf(Environment.GetCommandLineArgs(), "-perflog") >= 0;
+        string _fastBy;
+        float _perfClock;
+        int _perfTicks, _perfRenders;
+        readonly System.Collections.Generic.Dictionary<string, int> _perfWho =
+            new System.Collections.Generic.Dictionary<string, int>();
 
-        // Everything here is derived from the screen, so a change to any of it invalidates the lot.
-        int _lastScreenW;
-        int _lastScreenH;
-        int _lastTaskbarPx;
-        float _displayPoll;
+        /// <summary>True while a fullscreen app is in front and the pet is tucked away.</summary>
+        public bool HiddenForFullscreen { get; private set; }
 
-        // Apply() needs a window handle, and GetActiveWindow returns nothing until the window is
-        // actually up. Launched without focus it can miss, which silently leaves the game as an
-        // ordinary decorated window instead of the overlay, so it is retried for a short while.
-        float _applyRetry;
-        int _applyAttempts;
-
-        bool _suppressOverlay;
-        IntPtr _hwnd = IntPtr.Zero;
-        bool _clickThrough;
-        bool _active;
-
-        public int TaskbarHeightPx { get; private set; }
 
         /// <summary>Set by the pet each frame: true when the cursor is over something interactive.</summary>
         public bool PointerOverPet { get; set; }
 
-        /// <summary>
-        /// Returns true when the given screen point should be interactive. Supplied by
-        /// GameSession and evaluated against the OS cursor, so it works while the window is
-        /// click-through or unfocused. Unity's own mouse state does not.
-        /// </summary>
-        public System.Func<Vector2, bool> HitTest { get; set; }
+        /// <summary>Hit test against the OS cursor, supplied by GameSession.</summary>
+        public Func<Vector2, bool> HitTest { get; set; }
 
-        /// <summary>OS cursor position in Unity screen coordinates (origin bottom-left).</summary>
+        /// <summary>OS cursor in Unity screen coordinates (origin bottom-left of the window).</summary>
         public Vector2 CursorScreen { get; private set; }
-
         public bool CursorValid { get; private set; }
-
-        /// <summary>
-        /// Physical left-button state read from the OS. The overlay never takes focus, and Unity
-        /// does not deliver mouse input to an unfocused window, so button state cannot come from
-        /// the Input System here.
-        /// </summary>
         public bool PrimaryDown { get; private set; }
-
         public bool PrimaryPressedThisFrame { get; private set; }
-
-        bool _prevPrimary;
 
         public bool IsActive => _active;
 
+        /// <summary>
+        /// Width of the whole floor the pet can use, in world units. World x = 0 is the left end
+        /// of that floor (the screen edge, or a left taskbar's edge), whatever part of it the
+        /// window currently covers.
+        /// </summary>
+        public float WorldWidth => (_active ? Taskbar.Right - Taskbar.Left : Screen.width) / (Atlas.Ppu * _zoom);
+
+        bool _prevPrimary;
+        bool _active;
+        bool _suppressOverlay;
+        bool _clickThrough;
+        IntPtr _hwnd = IntPtr.Zero;
+        RectInt _windowRect;
+        int _lastScreenW, _lastScreenH;
+        float _layoutPoll;
+        float _fullscreenPoll;
+        int _fullscreenStreak;
+        float _applyRetry;
+        int _applyAttempts;
+        int _repositionFrames;
+        int _appliedFps = -1;
+        bool _hideWhenFullscreen = true;
+
         public static DesktopWindow Create()
         {
+            if (Instance != null)
+                return Instance;
             var existing = FindFirstObjectByType<DesktopWindow>();
             if (existing != null)
                 return existing;
-
             var go = new GameObject("DesktopWindow");
             DontDestroyOnLoad(go);
             return go.AddComponent<DesktopWindow>();
+        }
+
+        void Awake()
+        {
+            Instance = this;
+            // One worker is plenty; the default spawns one per core, each with its own allocators.
+            Unity.Jobs.LowLevel.Unsafe.JobsUtility.JobWorkerCount = 1;
+            QualitySettings.vSyncCount = 0;
+            QualitySettings.antiAliasing = 0;
+            QualitySettings.shadows = ShadowQuality.Disable;
+            ApplyFps(TickFps);
+        }
+
+        public void ApplyConfig(GameConfig config) => _config = config;
+
+        /// <summary>Settings: bigger or smaller pet, in whole steps of screen pixels per art pixel.</summary>
+        public void SetSizeStep(int step)
+        {
+            _sizeStep = Mathf.Clamp(step, -2, 3);
+            Relayout(true);
+        }
+
+        public void SetHideInFullscreen(bool on) => _hideWhenFullscreen = on;
+
+        /// <summary>The deepest pond that still leaves room for the pet in the fixed window.</summary>
+        public int MaxPondDepth => Mathf.Clamp(Mathf.Min(WindowArtH - 52,
+            Mathf.RoundToInt(Taskbar.Screen.height / (float)Mathf.Max(1, _zoom) * 0.45f)), 20, 160);
+
+        /// <summary>Full-width pond: the window spans the floor. Otherwise it is a box round the pet.</summary>
+        public void SetPondMode(bool full)
+        {
+            if (full == _fullPond)
+                return;
+            _fullPond = full;
+            Relayout(false);
+        }
+
+        /// <summary>
+        /// Keeps the pet inside the window. Moving a window (no resize) is cheap and does not
+        /// flash, so the box simply slides along when the pet nears an edge.
+        /// </summary>
+        public void Follow(float worldX, bool recentre)
+        {
+            _focusPx = Taskbar.Left + worldX * Atlas.Ppu * _zoom;
+            if (!_active || _fullPond || _windowRect.width <= 0)
+                return;
+            var margin = _windowRect.width * 0.28f;
+            var inside = _focusPx > _windowRect.x + margin && _focusPx < _windowRect.xMax - margin;
+            if (inside && !recentre)
+                return;
+            var x = Mathf.Clamp(Mathf.RoundToInt(_focusPx - _windowRect.width * 0.5f), Taskbar.Left,
+                Mathf.Max(Taskbar.Left, Taskbar.Right - _windowRect.width));
+            if (x == _windowRect.x)
+                return;
+            _windowRect.x = x;
+            MoveWindow();
+            LayoutCamera();
         }
 
         void Start()
@@ -146,222 +202,290 @@ namespace DeskPond
                 worldCamera = Camera.main;
 
 #if UNITY_STANDALONE_WIN && !UNITY_EDITOR
-            // -nooverlay runs as a normal opaque window, to separate rendering problems from
-            // transparency problems when diagnosing.
-            if (System.Array.IndexOf(System.Environment.GetCommandLineArgs(), "-nooverlay") >= 0)
+            if (Array.IndexOf(Environment.GetCommandLineArgs(), "-nooverlay") >= 0)
             {
-                _active = false;
                 _suppressOverlay = true;
                 Debug.Log("DeskPond: -nooverlay, running as a normal window.");
-                LayoutCamera();
             }
             else
             {
                 Apply();
             }
-#else
-            _active = false;
 #endif
             if (worldCamera != null)
             {
                 worldCamera.clearFlags = CameraClearFlags.SolidColor;
-                var bg = worldCamera.backgroundColor;
-                // Fully transparent black; the compositor shows the desktop through it.
-                worldCamera.backgroundColor = _active ? new Color(0f, 0f, 0f, 0f) : bg;
+                worldCamera.backgroundColor = _active ? new Color(0f, 0f, 0f, 0f) : new Color(0.16f, 0.18f, 0.26f, 1f);
+                worldCamera.orthographic = true;
+                worldCamera.allowHDR = false;
+                worldCamera.allowMSAA = false;
+                worldCamera.useOcclusionCulling = false;
             }
 
-            if (_active)
-                LayoutCamera();
+            Relayout(true);
         }
 
         /// <summary>
-        /// The water is a single stripe spanning the screen and resting on the taskbar, not a
-        /// wash of colour over it. The scene's full-screen "Pond" backdrop is hidden in overlay
-        /// mode; it would paint an opaque rectangle across the desktop.
+        /// Auto zoom from the screen height, so the pet is the same physical size on a laptop and
+        /// on a 4K monitor: 1080p is 3, 1440p is 4, 2160p is 6.
         /// </summary>
-        void LayoutWater()
+        int AutoZoom(int screenHeight)
+        {
+            var configured = _config != null ? Mathf.RoundToInt(_config.petZoom) : 0;
+            var baseZoom = Mathf.Max(2, Mathf.RoundToInt(screenHeight / 360f));
+            if (configured > 0 && Mathf.Abs(screenHeight - 1080) < 1)
+                baseZoom = configured;
+            return Mathf.Clamp(baseZoom + _sizeStep, 1, 10);
+        }
+
+        /// <summary>Reads the taskbar, sizes and places the window, then fits the camera.</summary>
+        void Relayout(bool force)
+        {
+            var info = TaskbarInfo.Read(Screen.currentResolution.width, Screen.currentResolution.height);
+            var zoom = AutoZoom(info.Screen.height);
+            var changed = force || !info.SameLayout(Taskbar) || zoom != _zoom;
+            Taskbar = info;
+            _zoom = zoom;
+
+            if (_active)
+            {
+                var span = info.Right - info.Left;
+                var height = Mathf.Min(WindowArtH * _zoom, info.FloorY - Mathf.Max(info.Work.yMin, info.Screen.yMin));
+                var width = _fullPond ? span : Mathf.Min(span, LocalArtW * _zoom);
+                var focus = _focusPx >= 0f ? _focusPx : info.Left + span * 0.6f;
+                var x = _fullPond ? info.Left
+                    : Mathf.Clamp(Mathf.RoundToInt(focus - width * 0.5f), info.Left, info.Right - width);
+                var rect = new RectInt(x, info.FloorY - height, width, height);
+                if (force || !rect.Equals(_windowRect))
+                {
+                    var resized = force || rect.width != _windowRect.width || rect.height != _windowRect.height;
+                    _windowRect = rect;
+                    if (resized)
+                        PlaceWindow();
+                    else
+                        MoveWindow();
+                    changed = true;
+                }
+            }
+
+            if (changed)
+            {
+                Debug.Log($"DeskPond layout: {info} zoom={_zoom} window=({_windowRect.x},{_windowRect.y}," +
+                          $"{_windowRect.width}x{_windowRect.height}) fullPond={_fullPond}");
+                LayoutCamera();
+                DisplayChanged?.Invoke();
+            }
+        }
+
+        /// <summary>Fits the camera so the window's bottom-left is world (0, 0).</summary>
+        void LayoutCamera()
         {
             if (worldCamera == null)
                 return;
-
-            var pond = GameObject.Find("Pond");
-            if (pond != null)
-            {
-                var backdrop = pond.GetComponent<SpriteRenderer>();
-                if (backdrop != null)
-                    backdrop.enabled = false;
-            }
-
-            var halfHeight = worldCamera.orthographicSize;
-            // A little overscan so no seam shows at the screen edges.
-            var viewWidth = halfHeight * worldCamera.aspect * 2f * 1.04f;
-            var camX = worldCamera.transform.position.x;
-
-            // Sits just above the waterline so the stripe rests on the taskbar's top edge.
-            Fit("TaskbarRim", viewWidth, waterRimThickness, camX,
-                waterlineWorldY + waterRimThickness * 0.5f, waterColor);
-        }
-
-        /// <summary>
-        /// Scales a quad to an exact world size, whatever its pixels-per-unit.
-        /// </summary>
-        static void Fit(string objectName, float worldWidth, float worldHeight, float x, float y, Color? tint)
-        {
-            var go = GameObject.Find(objectName);
-            if (go == null)
-                return;
-
-            var sr = go.GetComponent<SpriteRenderer>();
-            if (sr == null || sr.sprite == null)
-                return;
-
-            sr.enabled = true;
-            if (tint.HasValue)
-                sr.color = tint.Value;
-
-            var unit = sr.sprite.bounds.size;
-            if (unit.x <= 0f || unit.y <= 0f)
-                return;
-
-            go.transform.localScale = new Vector3(worldWidth / unit.x, worldHeight / unit.y, 1f);
-            go.transform.position = new Vector3(x, y, go.transform.position.z);
-        }
-
-        /// <summary>
-        /// Scales and positions the camera so one sprite pixel covers <see cref="zoom"/> screen
-        /// pixels, and the waterline lands exactly on the top edge of the real taskbar.
-        /// </summary>
-        void LayoutCamera()
-        {
-            if (worldCamera == null || !worldCamera.orthographic)
-                return;
-
-            // PixelPerfectCamera enforces its own reference resolution and would fight this.
-            var ppc = worldCamera.GetComponent<UnityEngine.Rendering.Universal.PixelPerfectCamera>();
-            if (ppc != null)
-                ppc.enabled = false;
-
-            var unitsPerPixel = 1f / (pixelsPerUnit * Mathf.Max(0.01f, zoom));
-            worldCamera.orthographicSize = Screen.height * unitsPerPixel * 0.5f;
-
-            TaskbarHeightPx = ReadTaskbarHeight();
-            var taskbarWorld = TaskbarHeightPx * unitsPerPixel;
-
-            var worldYAtScreenBottom = waterlineWorldY - taskbarWorld;
-            var pos = worldCamera.transform.position;
-            pos.y = worldYAtScreenBottom + worldCamera.orthographicSize;
-            worldCamera.transform.position = pos;
-
-            Debug.Log($"DeskPond layout: screen={Screen.width}x{Screen.height} taskbar={TaskbarHeightPx}px " +
-                      $"ortho={worldCamera.orthographicSize:0.00} camY={pos.y:0.00} zoom={zoom}");
-
-            LayoutWater();
-            LogSpriteDiagnostics();
-        }
-
-        /// <summary>
-        /// Reports where each sprite lands on screen, to tell layout bugs from render bugs.
-        /// </summary>
-        void LogSpriteDiagnostics()
-        {
-            foreach (var sr in FindObjectsByType<SpriteRenderer>(FindObjectsSortMode.None))
-            {
-                var screen = worldCamera.WorldToScreenPoint(sr.transform.position);
-                var spriteName = sr.sprite != null ? sr.sprite.name : "NULL";
-                Debug.Log($"DeskPond sprite: {sr.gameObject.name} enabled={sr.enabled} " +
-                          $"world={sr.transform.position} screen=({screen.x:0},{screen.y:0}) " +
-                          $"order={sr.sortingOrder} colorA={sr.color.a:0.00} sprite={spriteName}");
-            }
-        }
-
-        int ReadTaskbarHeight()
-        {
-#if UNITY_STANDALONE_WIN && !UNITY_EDITOR
-            try
-            {
-                // Work area excludes the taskbar, so the difference is its height.
-                if (SystemParametersInfo(SPI_GETWORKAREA, 0, out var work, 0))
-                {
-                    var height = Screen.currentResolution.height - (work.Bottom - work.Top);
-                    if (height > 0 && height < 200)
-                        return height;
-                }
-            }
-            catch (Exception ex)
-            {
-                Debug.LogWarning("DeskPond: could not read work area. " + ex.Message);
-            }
-#endif
-            return fallbackTaskbarPx;
+            // The scene camera once carried a letterboxed viewport from a pixel-perfect component;
+            // anything but the full window squashes the art.
+            worldCamera.rect = new Rect(0f, 0f, 1f, 1f);
+            var upp = 1f / (Atlas.Ppu * _zoom);
+            worldCamera.orthographicSize = Screen.height * upp * 0.5f;
+            var p = worldCamera.transform.position;
+            // The world is anchored to the desktop floor, so moving the window just moves the camera.
+            var offset = _active ? (_windowRect.x - Taskbar.Left) * upp : 0f;
+            worldCamera.transform.position = new Vector3(offset + Screen.width * upp * 0.5f,
+                Screen.height * upp * 0.5f, p.z);
+            _lastScreenW = Screen.width;
+            _lastScreenH = Screen.height;
         }
 
         void Update()
         {
-            // The hover test uses the OS cursor, not Unity's mouse. While the window is
-            // click-through, mouse messages go to whatever is underneath, so Unity's pointer state
-            // freezes. Driving click-through from it deadlocks: the window stays transparent, so
-            // Unity never sees the cursor arrive, so it never becomes clickable.
-            TickApplyRetry(Time.unscaledDeltaTime);
+            var dt = Time.unscaledDeltaTime;
+            TickApplyRetry(dt);
 
             CursorValid = TryGetCursor(out var cursor);
             if (CursorValid)
                 CursorScreen = cursor;
 
             var down = ReadPrimaryDown();
-            PrimaryPressedThisFrame = down && !_prevPrimary;
+            // The button is read globally, so a click meant for another app would otherwise start a
+            // drag here. Only count it if the overlay was actually taking clicks when it happened
+            // (click-through off), and never in snapshot runs.
+            PrimaryPressedThisFrame = down && !_prevPrimary && (!_active || !_clickThrough) && !SnapshotMode.Active;
             _prevPrimary = down;
             PrimaryDown = down;
 
-            if (!_active)
+            // Unity resizes its surface a frame or two after the window changes; refit then.
+            if (Screen.width != _lastScreenW || Screen.height != _lastScreenH)
             {
-                PointerOverPet = false;
-                return;
+                LayoutCamera();
+                DisplayChanged?.Invoke();
             }
 
-            var over = PointerOverPet;
-            if (CursorValid && HitTest != null)
-                over |= HitTest(CursorScreen);
+            if (_repositionFrames > 0)
+            {
+                _repositionFrames--;
+                MoveWindow();
+            }
 
-            SetClickThrough(!over);
+            if (_active)
+            {
+                var over = PointerOverPet;
+                if (CursorValid && HitTest != null && !HiddenForFullscreen)
+                    over |= HitTest(CursorScreen);
+                SetClickThrough(!over);
+
+                _layoutPoll -= dt;
+                if (_layoutPoll <= 0f)
+                {
+                    // A system call, so polled rather than run every frame.
+                    _layoutPoll = 1f;
+                    Relayout(false);
+                }
+
+                _fullscreenPoll -= dt;
+                if (_fullscreenPoll <= 0f)
+                {
+                    _fullscreenPoll = 1.5f;
+                    UpdateFullscreenHide();
+                }
+            }
+
+            // Logic and input tick at 30 (60 while dragging); drawing drops to every third tick
+            // when nothing is happening. Skipped ticks neither render nor present.
+            var fast = WantFast || PointerOverPet || WantSmooth;
+            if (_perfLog)
+                TickPerfLog(fast);
+            ApplyFps(HiddenForFullscreen ? HiddenFps : WantSmooth ? DragFps : TickFps);
+            var interval = HiddenForFullscreen || fast ? 1 : IdleRenderInterval;
+            if (UnityEngine.Rendering.OnDemandRendering.renderFrameInterval != interval)
+                UnityEngine.Rendering.OnDemandRendering.renderFrameInterval = interval;
+
             PointerOverPet = false;
+            WantFast = false;
+            WantSmooth = false;
+        }
 
-            TickDisplayWatch(Time.unscaledDeltaTime);
+        void TickPerfLog(bool fast)
+        {
+            _perfTicks++;
+            if (fast || _perfTicks % IdleRenderInterval == 0)
+                _perfRenders++;
+            if (fast)
+            {
+                var who = WantSmooth ? "smooth" : PointerOverPet ? "pointer" : _fastBy ?? "?";
+                _perfWho.TryGetValue(who, out var n);
+                _perfWho[who] = n + 1;
+            }
+            _fastBy = null;
+            _perfClock += Time.unscaledDeltaTime;
+            if (_perfClock < 10f)
+                return;
+            var parts = new System.Text.StringBuilder();
+            foreach (var kv in _perfWho)
+                parts.Append(kv.Key).Append('=').Append(kv.Value).Append(' ');
+            Debug.Log($"DeskPond perf: {_perfTicks / _perfClock:0.0} ticks/s, ~{_perfRenders / _perfClock:0.0} renders/s, fast by: {parts}");
+            _perfClock = 0f;
+            _perfTicks = 0;
+            _perfRenders = 0;
+            _perfWho.Clear();
+        }
+
+        void ApplyFps(int fps)
+        {
+            if (fps == _appliedFps)
+                return;
+            _appliedFps = fps;
+            Application.targetFrameRate = fps;
+        }
+
+        // ------------------------------------------------------------------ fullscreen apps
+
+        void UpdateFullscreenHide()
+        {
+            var hide = _hideWhenFullscreen && !SnapshotMode.Active && ForegroundIsFullscreen();
+            // Hiding and re-showing a screen-wide layered window makes the whole desktop hitch, so
+            // only hide once a fullscreen window has stayed in front for two polls (~3 s). Brief
+            // overlays (a screenshot, alt-tab) then never trigger it. Coming back is immediate.
+            if (hide && !HiddenForFullscreen && ++_fullscreenStreak < 2)
+                return;
+            if (!hide)
+                _fullscreenStreak = 0;
+            if (hide == HiddenForFullscreen)
+                return;
+
+            HiddenForFullscreen = hide;
+            if (worldCamera != null)
+                worldCamera.enabled = !hide;
+#if UNITY_STANDALONE_WIN && !UNITY_EDITOR
+            if (_hwnd != IntPtr.Zero)
+            {
+                ShowWindow(_hwnd, hide ? SW_HIDE : SW_SHOWNOACTIVATE);
+                if (!hide)
+                    PushToFront();
+            }
+#endif
+            Debug.Log("DeskPond: " + (hide ? "fullscreen app in front, hiding." : "back on the desktop."));
+        }
+
+        bool ForegroundIsFullscreen()
+        {
+#if UNITY_STANDALONE_WIN && !UNITY_EDITOR
+            var fg = GetForegroundWindow();
+            if (fg == IntPtr.Zero || fg == _hwnd)
+                return false;
+
+            var cls = new System.Text.StringBuilder(64);
+            GetClassName(fg, cls, cls.Capacity);
+            var name = cls.ToString();
+            if (name == "Progman" || name == "WorkerW" || name == "Shell_TrayWnd"
+                || name == "Shell_SecondaryTrayWnd" || name == "Windows.UI.Core.CoreWindow")
+                return false;
+
+            if (!GetWindowRect(fg, out var r))
+                return false;
+            var s = Taskbar.Screen;
+            if (!(r.Left <= s.xMin && r.Top <= s.yMin && r.Right >= s.xMax && r.Bottom >= s.yMax))
+                return false;
+            return !IsScreenshotTool(fg);
+#else
+            return false;
+#endif
         }
 
         /// <summary>
-        /// The screen can change under a running overlay: a monitor is plugged in or unplugged,
-        /// the resolution or scaling changes, or the taskbar is resized or moved to another edge.
-        /// The camera, the waterline and the window size are all measured from the screen, so they
-        /// are recomputed rather than trusted from startup.
-        ///
-        /// Polled on a timer instead of every frame because reading the work area is a system call.
+        /// Screenshot tools cover the whole screen with a frozen image while you pick an area.
+        /// That is not a fullscreen app, and the pet should stay in the shot.
         /// </summary>
-        void TickDisplayWatch(float dt)
+        static bool IsScreenshotTool(IntPtr hwnd)
         {
-            _displayPoll -= dt;
-            if (_displayPoll > 0f)
-                return;
-            _displayPoll = 0.5f;
-
-            var taskbar = ReadTaskbarHeight();
-            if (Screen.width == _lastScreenW && Screen.height == _lastScreenH
-                && taskbar == _lastTaskbarPx)
-                return;
-
-            var first = _lastScreenW == 0;
-            _lastScreenW = Screen.width;
-            _lastScreenH = Screen.height;
-            _lastTaskbarPx = taskbar;
-
-            // Start() already sized and laid out; only react to later changes.
-            if (first)
-                return;
-
-            Debug.Log($"DeskPond display changed: {Screen.width}x{Screen.height} taskbar={taskbar}px");
-            ResizeToScreen();
-            LayoutCamera();
-            DisplayChanged?.Invoke();
+#if UNITY_STANDALONE_WIN && !UNITY_EDITOR
+            GetWindowThreadProcessId(hwnd, out var pid);
+            if (pid == 0)
+                return false;
+            try
+            {
+                using (var p = System.Diagnostics.Process.GetProcessById((int)pid))
+                {
+                    switch (p.ProcessName.ToLowerInvariant())
+                    {
+                        case "snippingtool": case "screenclippinghost": case "screensketch":
+                        case "sharex": case "snipaste": case "lightshot": case "greenshot":
+                        case "picpick": case "flameshot": case "pixpin": case "wechat": case "weixin":
+                        case "qq": case "feishu": case "lark": case "dingtalk":
+                            return true;
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                // The process may have exited between the two calls.
+            }
+            return false;
+#else
+            return false;
+#endif
         }
+
+        // ------------------------------------------------------------------ input
 
         static bool ReadPrimaryDown()
         {
@@ -381,24 +505,16 @@ namespace DeskPond
             if (!GetCursorPos(out var p))
                 return false;
 
-            // GetCursorPos is in desktop coordinates; Unity's screen space is the window's client
-            // area, bottom-left origin. Converting through the client rect rather than assuming the
-            // two are the same rectangle is what keeps clicks landing on what they look like they
-            // are landing on: the moment the window is inset, decorated, or sized to anything other
-            // than the whole desktop, the difference becomes a constant offset on every hit test.
+            // Desktop coordinates to the client area, then scaled to Unity's screen space in case
+            // the backbuffer has not caught up with a resize yet.
             var local = p;
-            if (_hwnd != IntPtr.Zero && ScreenToClient(_hwnd, ref local)
-                && GetClientRect(_hwnd, out var client))
+            if (_hwnd != IntPtr.Zero && ScreenToClient(_hwnd, ref local) && GetClientRect(_hwnd, out var client))
             {
                 var w = client.Right - client.Left;
                 var h = client.Bottom - client.Top;
                 if (w > 0 && h > 0)
                 {
-                    // Scale rather than assume the two rectangles are the same size. They usually
-                    // are, and then this is the identity; when they are not, a fixed subtraction
-                    // would leave clicks landing a little off wherever the pointer is.
-                    screen = new Vector2(local.X * (float)Screen.width / w,
-                        (h - local.Y) * (float)Screen.height / h);
+                    screen = new Vector2(local.X * (float)Screen.width / w, (h - local.Y) * (float)Screen.height / h);
                     return true;
                 }
             }
@@ -414,45 +530,85 @@ namespace DeskPond
 #endif
         }
 
-        /// <summary>
-        /// Apply needs a window handle, and GetActiveWindow has nothing to give until the window
-        /// is really up. Launched without focus it can miss, which would silently leave the game
-        /// as an ordinary decorated window instead of the overlay, so it is retried briefly.
-        /// </summary>
+        // ------------------------------------------------------------------ window
+
         void TickApplyRetry(float dt)
         {
 #if UNITY_STANDALONE_WIN && !UNITY_EDITOR
             if (_active || _suppressOverlay || _applyAttempts >= 20)
                 return;
-
             _applyRetry -= dt;
             if (_applyRetry > 0f)
                 return;
-
             _applyRetry = 0.25f;
             _applyAttempts++;
             Apply();
             if (_active)
             {
                 Debug.Log($"DeskPond: overlay applied on attempt {_applyAttempts}.");
-                LayoutCamera();
+                if (worldCamera != null)
+                    worldCamera.backgroundColor = new Color(0f, 0f, 0f, 0f);
+                Relayout(true);
             }
 #endif
         }
 
-        /// <summary>Stretches the overlay across the whole primary display.</summary>
-        void ResizeToScreen()
+        /// <summary>
+        /// Resizes Unity's surface first, then moves the OS window over it. SetResolution may
+        /// re-centre the window, so the move is repeated for a few frames until it sticks.
+        /// </summary>
+        void PlaceWindow()
+        {
+#if UNITY_STANDALONE_WIN && !UNITY_EDITOR
+            if (_hwnd == IntPtr.Zero || _windowRect.width <= 0 || _windowRect.height <= 0)
+                return;
+            if (Screen.width != _windowRect.width || Screen.height != _windowRect.height)
+                Screen.SetResolution(_windowRect.width, _windowRect.height, FullScreenMode.Windowed);
+            MoveWindow();
+            _repositionFrames = 4;
+#endif
+        }
+
+        void MoveWindow()
         {
 #if UNITY_STANDALONE_WIN && !UNITY_EDITOR
             if (_hwnd == IntPtr.Zero)
                 return;
-            var res = Screen.currentResolution;
-            SetWindowPos(_hwnd, HWND_TOPMOST, 0, 0, res.width, res.height,
-                SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            // Screen.SetResolution can put Unity's own window style back; re-assert ours.
+            SetWindowLong(_hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
+            SetWindowLong(_hwnd, GWL_EXSTYLE, (uint)(_clickThrough ? BaseExStyle | WS_EX_TRANSPARENT : BaseExStyle));
+            SetWindowPos(_hwnd, HWND_TOPMOST, _windowRect.x, _windowRect.y, _windowRect.width,
+                _windowRect.height, SWP_NOACTIVATE | (HiddenForFullscreen ? 0u : SWP_SHOWWINDOW));
+#endif
+        }
+
+        public void PushToFront()
+        {
+#if UNITY_STANDALONE_WIN && !UNITY_EDITOR
+            if (_hwnd != IntPtr.Zero)
+                SetWindowPos(_hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 #endif
         }
 
 #if UNITY_STANDALONE_WIN && !UNITY_EDITOR
+        const int GWL_STYLE = -16;
+        const int GWL_EXSTYLE = -20;
+        const uint WS_POPUP = 0x80000000;
+        const uint WS_VISIBLE = 0x10000000;
+        const int WS_EX_LAYERED = 0x00080000;
+        const int WS_EX_TRANSPARENT = 0x00000020;
+        const int WS_EX_TOPMOST = 0x00000008;
+        // A borderless popup gets no taskbar button without this, which once left no way to quit.
+        const int WS_EX_APPWINDOW = 0x00040000;
+        const int BaseExStyle = WS_EX_LAYERED | WS_EX_APPWINDOW | WS_EX_TOPMOST;
+        const uint SWP_NOSIZE = 0x0001;
+        const uint SWP_NOMOVE = 0x0002;
+        const uint SWP_NOACTIVATE = 0x0010;
+        const uint SWP_SHOWWINDOW = 0x0040;
+        const int SW_HIDE = 0;
+        const int SW_SHOWNOACTIVATE = 4;
+        static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+
         void Apply()
         {
             try
@@ -465,20 +621,6 @@ namespace DeskPond
                 SetWindowLong(_hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
                 SetWindowLong(_hwnd, GWL_EXSTYLE, BaseExStyle);
                 DwmExtendFrameIntoClientArea(_hwnd, ref margins);
-                ResizeToScreen();
-
-                // Unity sized its surface for the decorated window it created, then the lines
-                // above stripped the decoration and stretched it, leaving Screen reporting the
-                // old smaller rectangle. Asking it to resync does not always take, so this is best
-                // effort: TryGetCursor scales between the two spaces either way.
-                if (GetClientRect(_hwnd, out var client))
-                {
-                    var w = client.Right - client.Left;
-                    var h = client.Bottom - client.Top;
-                    if (w > 0 && h > 0 && (w != Screen.width || h != Screen.height))
-                        Screen.SetResolution(w, h, FullScreenMode.Windowed);
-                }
-
                 _active = true;
                 _clickThrough = false;
             }
@@ -493,7 +635,6 @@ namespace DeskPond
         {
             if (value == _clickThrough || _hwnd == IntPtr.Zero)
                 return;
-
             _clickThrough = value;
             var ex = BaseExStyle;
             if (value)
@@ -501,80 +642,36 @@ namespace DeskPond
             SetWindowLong(_hwnd, GWL_EXSTYLE, (uint)ex);
         }
 
-        /// <summary>Re-asserts topmost; some shells demote overlays after a fullscreen app appears.</summary>
-        public void PushToFront()
-        {
-            if (_hwnd != IntPtr.Zero)
-                SetWindowPos(_hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        }
+        [StructLayout(LayoutKind.Sequential)]
+        struct Margins { public int Left, Right, Top, Bottom; }
 
         [StructLayout(LayoutKind.Sequential)]
-        struct Margins
-        {
-            public int Left;
-            public int Right;
-            public int Top;
-            public int Bottom;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        struct RectNative
-        {
-            public int Left;
-            public int Top;
-            public int Right;
-            public int Bottom;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        struct PointNative
-        {
-            public int X;
-            public int Y;
-        }
-
-        const uint SPI_GETWORKAREA = 0x0030;
-
-        [DllImport("user32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        static extern bool SystemParametersInfo(uint action, uint param, out RectNative result, uint winIni);
-
-        [DllImport("user32.dll")]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        static extern bool GetCursorPos(out PointNative point);
-
-        [DllImport("user32.dll")]
-        static extern short GetAsyncKeyState(int vKey);
-
-        [DllImport("user32.dll")]
-        static extern IntPtr GetActiveWindow();
-
-        [DllImport("user32.dll")]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        static extern bool GetClientRect(IntPtr hwnd, out RECT rect);
-
-        [DllImport("user32.dll")]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        static extern bool ScreenToClient(IntPtr hwnd, ref PointNative point);
+        struct PointNative { public int X, Y; }
 
         [StructLayout(LayoutKind.Sequential)]
         struct RECT { public int Left, Top, Right, Bottom; }
 
+        [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)]
+        static extern bool GetCursorPos(out PointNative point);
+        [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vKey);
+        [DllImport("user32.dll")] static extern IntPtr GetActiveWindow();
+        [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        static extern int GetClassName(IntPtr hwnd, System.Text.StringBuilder name, int max);
+        [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)]
+        static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
+        [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)]
+        static extern bool GetClientRect(IntPtr hwnd, out RECT rect);
+        [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)]
+        static extern bool ScreenToClient(IntPtr hwnd, ref PointNative point);
+        [DllImport("user32.dll")] static extern int SetWindowLong(IntPtr hwnd, int index, uint newStyle);
+        [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hwnd, int cmd);
         [DllImport("user32.dll")]
-        static extern int SetWindowLong(IntPtr hwnd, int index, uint newStyle);
-
-        [DllImport("user32.dll")]
-        static extern bool SetWindowPos(IntPtr hwnd, IntPtr hwndAfter,
-            int x, int y, int cx, int cy, uint flags);
-
-        [DllImport("Dwmapi.dll")]
-        static extern int DwmExtendFrameIntoClientArea(IntPtr hwnd, ref Margins margins);
+        static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
+        [DllImport("Dwmapi.dll")] static extern int DwmExtendFrameIntoClientArea(IntPtr hwnd, ref Margins margins);
 #else
         void SetClickThrough(bool value) => _clickThrough = value;
-
-        public void PushToFront()
-        {
-        }
 #endif
     }
 }

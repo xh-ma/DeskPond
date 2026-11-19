@@ -1,62 +1,71 @@
+using System.Collections.Generic;
 using UnityEngine;
-using UnityEngine.InputSystem;
 
 namespace DeskPond
 {
+    /// <summary>
+    /// The game: turns clicks, keystrokes and idle time into bites, decides what is caught, and
+    /// owns the save. Everything visible is delegated: <see cref="Angler"/> (the pet),
+    /// <see cref="PondView"/> (the water), <see cref="PondMenu"/> (the panel), and so on.
+    ///
+    /// The loop: the cat fishes on its own. Typing and clicking drop bait crumbs that draw fish in,
+    /// so focused work brings bites faster; sitting idle still earns a slow trickle. Each bite has
+    /// a small chance to be golden, which waits for a click.
+    /// </summary>
     [DefaultExecutionOrder(-50)]
     public class GameSession : MonoBehaviour
     {
         [SerializeField] GameConfig config;
-        [SerializeField] CatPresenter cat;
-        [SerializeField] BasketPresenter basket;
-        [SerializeField] FishingRig rig;
-        [SerializeField] Camera worldCamera;
-        [SerializeField] float waterSurfaceY = -5.05f;
-
-        /// <summary>Where the water sits in world space; DesktopWindow maps it to the taskbar.</summary>
-        const float WaterlineY = -5.04f;
 
         SaveData _save;
         GameHud _hud;
-        BasketMenu _menu;
+        PondMenu _menu;
+        public PondMenu Menu => _menu;
         StatsPanel _stats;
         GlobalInputCounter _input;
         ActivityLog _activity;
         ForegroundWatcher _foreground;
         RateModel _pacing;
-        PetDragger _dragger;
         DesktopWindow _window;
-        CatState _state = CatState.Idle;
-        float _catchElapsed;
+        PondView _pond;
+        Angler _angler;
+        Critters _critters;
+        Ambience _ambience;
+        Camera _camera;
+
         float _saveCooldown;
         bool _dirty;
         int _idleFishGranted;
-        bool _giftSent;
+        bool _biteDue;
+        float _sinceBite = 9999f;
+        float _bait;
+        float _fullSeconds;
+        float _crowRoll = 60f;
+        float _moodClock;
+        LetterPanel _letter;
+        float _streak;
+        bool _streakLive;
+        float _visitorClock = 420f;
+        float _slowPoll;
+        WeatherKind _weatherShown;
+        float _petCooldown, _petGiftCooldown;
+        bool _writing;
+        float _noteUntil;
         readonly System.Random _rng = new System.Random();
-
-        /// <summary>Enabled by the -debuginput command line flag; logs every resolved click.</summary>
-        static readonly bool _logInput =
-            System.Array.IndexOf(System.Environment.GetCommandLineArgs(), "-debuginput") >= 0;
+        List<string> _ghosts;
 
         public int Coins => _save != null ? _save.coins : 0;
-        public int BasketFish => _save != null ? _save.basketFish : 0;
+        public int BasketFish => _save != null ? _save.catches.Count : 0;
         public int Capacity => ShopDefs.Capacity(_save != null ? _save.basketLevel : 0);
-        public bool BasketFull => _save != null && _save.basketFish >= Capacity;
-        public int FishPrice => ShopDefs.FishPrice(_save != null ? _save.lureLevel : 0);
+        public bool BasketFull => _save != null && _save.catches.Count >= Capacity;
         public SaveData Save => _save;
         public GlobalInputCounter Input => _input;
         public GameConfig Config => config;
-
-        /// <summary>The activity history, or null when logging is switched off in the config.</summary>
         public ActivityLog Activity => _activity;
-
-        /// <summary>Learned pacing model. Null until Start has run.</summary>
         public RateModel Pacing => _pacing;
+        public PondView Pond => _pond;
+        public Angler Pet => _angler;
 
-        /// <summary>
-        /// Whether window titles are being recorded. The save wins once the player has chosen;
-        /// until then the config default applies.
-        /// </summary>
         public bool RecordTitles
         {
             get
@@ -67,157 +76,251 @@ namespace DeskPond
             }
         }
 
-        /// <summary>Turns title recording on or off from the panel and remembers the choice.</summary>
         public void SetRecordTitles(bool on)
         {
             if (_save == null)
                 return;
-
             _save.recordTitles = on ? 1 : 0;
-            _dirty = true;
-            Persist();
-
-            // Turning it off should also drop what was already captured, otherwise the switch
-            // only stops new titles and quietly leaves the old ones on disk.
+            MarkDirty(true);
             if (!on && _activity != null && config != null)
                 _activity.ForgetTitles(config.retentionDays);
-
-            Debug.Log("DeskPond activity: window titles " + (on ? "on" : "off"));
         }
 
-        /// <summary>Seconds of unbroken idle time. Resets to zero on any counted input.</summary>
         public float IdleSeconds { get; private set; }
-
-        /// <summary>True once idle long enough that the cat is visibly waiting it out.</summary>
         public bool IsIdle => config != null && IdleSeconds >= config.idleThresholdSeconds;
 
-        /// <summary>0..1 progress toward the next bite.</summary>
         public float CatchProgress =>
             _save == null || _save.nextCatchTarget <= 0
                 ? 0f
                 : Mathf.Clamp01((float)_save.inputsTowardCatch / _save.nextCatchTarget);
 
-        public void Bind(GameConfig gameConfig, CatPresenter catPresenter,
-            BasketPresenter basketPresenter, Camera cam)
+        public DriftingGift ActiveGift { get; set; }
+        public MailBottle ActiveMail { get; set; }
+
+        /// <summary>Seconds of the work stretch going on now (it ends after two idle minutes).</summary>
+        public float StreakSeconds => _streak;
+
+        /// <summary>0..3: how much the current stretch is tilting the odds toward rarer fish.</summary>
+        public int StreakTier => _streak >= 3600f ? 3 : _streak >= 1800f ? 2 : _streak >= 900f ? 1 : 0;
+
+        /// <summary>0..5, from the saved affection.</summary>
+        public int BondLevel => _save == null ? 0 : Mathf.Clamp(Mathf.FloorToInt(_save.affection / 20f), 0, 5);
+
+        /// <summary>
+        /// Play time left until the next gift box, or -1 while one is on screen waiting to be
+        /// opened. Counts while the app runs, whether the user is busy or idle; nothing resets it.
+        /// </summary>
+        public float GiftSecondsLeft
+        {
+            get
+            {
+                if (_save == null || ActiveGift != null)
+                    return -1f;
+                return Mathf.Max(0f, GiftSecondsTotal - _save.giftSeconds);
+            }
+        }
+
+        public float GiftSecondsTotal =>
+            GiftOverride > 0f ? GiftOverride : config != null ? Mathf.Max(10f, config.giftEverySeconds) : 3600f;
+
+        /// <summary>-giftevery=N on the command line, for checking the timer without waiting an hour.</summary>
+        static readonly float GiftOverride = ReadGiftOverride();
+
+        static float ReadGiftOverride()
+        {
+            foreach (var a in System.Environment.GetCommandLineArgs())
+                if (a.StartsWith("-giftevery=") && float.TryParse(a.Substring(11), out var s))
+                    return Mathf.Max(5f, s);
+            return 0f;
+        }
+
+        /// <summary>
+        /// Banks play time toward the next gift. Paused while a box is out, so unopened boxes
+        /// never stack up.
+        /// </summary>
+        void TickGift(float dt)
+        {
+            if (_save == null || ActiveGift != null)
+                return;
+            _save.giftSeconds += dt;
+            if (_save.giftSeconds < GiftSecondsTotal)
+                return;
+            Debug.Log($"DeskPond gift: {GiftSecondsTotal:0}s of play time banked, sending a gift box.");
+            _save.giftSeconds = 0f;
+            MarkDirty(false);
+            SpawnGift();
+        }
+
+        /// <summary>Legacy entry point kept for the scene's serialized reference.</summary>
+        public void Bind(GameConfig gameConfig, Object a, Object b, Camera cam)
         {
             config = gameConfig;
-            cat = catPresenter;
-            basket = basketPresenter;
-            worldCamera = cam;
+            _camera = cam;
         }
+
+        // ------------------------------------------------------------------ startup
 
         void Start()
         {
-            ResolveRefs();
-            if (cat != null)
-            {
-                cat.ApplyConfig(config);
-                cat.Bind(cat.GetComponent<SpriteRenderer>());
-            }
-            if (basket != null)
-                basket.Bind(basket.GetComponent<SpriteRenderer>(), basket.transform.Find("FullCue"));
-
-            SeatOnWaterline();
+            if (config == null)
+                config = GameRuntimeSetup.LoadConfig();
+            _camera = Camera.main;
 
             _save = SaveSystem.LoadOrCreate();
-            ClampBasket();
-
             _pacing = new RateModel(_save.pacing);
             _save.pacing = _pacing.State;
-            StartActivityLog();
-
             if (_save.nextCatchTarget <= 0)
                 RollNextTarget();
 
-            _hud = FindFirstObjectByType<GameHud>();
-            if (_hud == null)
-                _hud = GameHud.Create();
-
-            _menu = FindFirstObjectByType<BasketMenu>();
-            if (_menu == null)
-                _menu = BasketMenu.Create(this, config);
-
-            _stats = FindFirstObjectByType<StatsPanel>();
-            if (_stats == null)
-                _stats = StatsPanel.Create(this, config);
-            _menu.OnStatsRequested = ToggleStats;
+            _input = FindFirstObjectByType<GlobalInputCounter>() ?? GlobalInputCounter.Create();
+            StartActivityLog();
 
             _window = DesktopWindow.Create();
             _window.ApplyConfig(config);
+            _window.SetHideInFullscreen(_save.hideInFullscreen);
+            _window.SetSizeStep(_save.sizeStep);
             _window.HitTest = ScreenPointInteractive;
             _window.DisplayChanged += OnDisplayChanged;
-            _dragger = FindFirstObjectByType<PetDragger>();
-            if (_dragger == null && cat != null && basket != null)
-                _dragger = PetDragger.Create(this, cat.transform, basket.transform, worldCamera);
-            if (_dragger != null)
-                _dragger.SetWindow(_window);
 
-            _hud.Bind(this, cat != null ? cat.transform : null, basket != null ? basket.transform : null,
-                worldCamera, config != null ? config.petZoom : 3f);
+            _ambience = Ambience.Create();
+            _ambience.SetEnabled(_save.soundOn, _save.volume);
 
-            ApplySkins();
-            Enter(BasketFull ? CatState.Idle : CatState.Waiting);
-            RefreshView();
+            _hud = FindFirstObjectByType<GameHud>() ?? GameHud.Create();
+            _pond = PondView.Create();
+            _angler = Angler.Create(this, _pond, _window, _hud);
+            _critters = Critters.Create(_window, _angler);
+            _pond.MaxDepth = _window.MaxPondDepth;
+            _pond.SetDepth(_save.pondDepth);
+            _pond.DepthChanged += OnDepthChanged;
+            _hud.Bind(this, _angler.CatTransform, _angler.BucketTransform, _camera, _window.Zoom);
 
-            // -gift forces one on every launch, for checking the drift without wiping the save.
+            _menu = PondMenu.Create(this);
+            _stats = StatsPanel.Create(this, config);
+            _letter = LetterPanel.Create();
+
+            _angler.BucketClicked = ToggleMenu;
+            _angler.CatClicked = PetCat;
+
+            _weatherShown = Weather.Now;
+            _pond.SetWeather(_weatherShown);
+            StartBond();
+            EnsureQuest();
+            if (_save.firstRunDay == 0)
+                _save.firstRunDay = Stamp(System.DateTime.Now);
+            // Sets finished before this update existed still earn their prize.
+            AnnounceSets();
+            foreach (var a in System.Environment.GetCommandLineArgs())
+            {
+                if (a == "-visitor")
+                    _visitorClock = 8f;
+                if (a == "-mail")
+                    _save.letterSeconds = LetterEverySeconds - 6f;
+            }
+
+            ApplyLooks();
+            ApplySettings();
+            OnDisplayChanged();
+
             var forceGift = System.Array.IndexOf(System.Environment.GetCommandLineArgs(), "-gift") >= 0;
             if (forceGift || !_save.welcomeGiftGiven)
             {
                 _save.welcomeGiftGiven = true;
-                _dirty = true;
+                MarkDirty(false);
                 StartCoroutine(WelcomeGift());
             }
-            Debug.Log("DeskPond save path: " + SaveSystem.FilePath);
-            var configName = config != null ? config.name : "NULL";
-            var inputRange = config != null && config.adaptivePacing
-                ? $"adaptive({config.minutesPerFish}min, {_pacing.Samples}/{RateModel.WarmupSamples} " +
-                  $"samples, median={_pacing.MedianRate:0.#}/min)"
-                : ShopDefs.MinInputs(_save.rodLevel) + "-" + ShopDefs.MaxInputs(_save.rodLevel);
-            var hooked = _input != null && _input.IsGlobal;
-            Debug.Log($"DeskPond config: asset={configName} " +
-                      $"idleThreshold={config.idleThresholdSeconds}s " +
-                      $"fishEvery={config.idleSecondsPerFish}s " +
-                      $"giftEvery={config.idleSecondsPerGift}s " +
-                      $"inputsPerFish={inputRange} globalHook={hooked}");
+
+            Debug.Log("DeskPond save path: " + SaveSystem.FilePath + " globalHook=" + _input.IsGlobal);
         }
+
+        void StartActivityLog()
+        {
+            if (config == null || !config.trackActivity || SnapshotMode.Active)
+                return;
+            _activity = ActivityLog.Load();
+            _foreground = new ForegroundWatcher();
+        }
+
+        void OnDepthChanged(int depth, bool done)
+        {
+            _angler.Relayout();
+            if (!done)
+                return;
+            _save.pondDepth = depth;
+            MarkDirty(true);
+        }
+
+        public void SetPondDepth(int depth)
+        {
+            _pond.SetDepth(depth);
+            OnDepthChanged(_pond.Depth, true);
+        }
+
+        void OnDisplayChanged()
+        {
+            if (_pond == null || _angler == null)
+                return;
+            _pond.MaxDepth = _window.MaxPondDepth;
+            _pond.SetWindowWidth(_window.WorldWidth);
+            _angler.Relayout();
+            var norm = _save.petNormX >= 0f ? _save.petNormX : 0.62f;
+            _angler.SetWorldX(norm * _window.WorldWidth);
+            _hud?.Bind(this, _angler.CatTransform, _angler.BucketTransform, _camera, _window.Zoom);
+            _menu?.ClampIntoScreen();
+            _stats?.ClampIntoScreen();
+            _letter?.ClampIntoScreen();
+        }
+
+        public void StorePetPosition()
+        {
+            if (_save == null || _window == null || _window.WorldWidth <= 0f)
+                return;
+            _save.petNormX = Mathf.Clamp01(_angler.transform.position.x / _window.WorldWidth);
+            MarkDirty(false);
+        }
+
+        // ------------------------------------------------------------------ frame
 
         void Update()
         {
-            AccumulateInput();
-            HandleClick();
-            TickState(Time.deltaTime);
-            TickActivity(Time.deltaTime);
-            TickAutosave(Time.deltaTime);
+            var dt = Time.deltaTime;
+            _pond.TickGrip(_window, _camera);
+            AccumulateInput(dt);
+            TickFishing(dt);
+            TickGift(Time.unscaledDeltaTime);
+            TickStreak(dt);
+            TickSlow(dt);
+            TickVisitors(dt);
+            TickLetters(Time.unscaledDeltaTime);
+            _petCooldown -= dt;
+            _petGiftCooldown -= dt;
+            TickMoods(dt);
+            TickThief(dt);
+            HandleClicks();
+            TickActivity(dt);
+            TickAutosave(dt);
 
-            // The open panel must stay clickable even though it is not part of the pet sprite.
-            if (_window != null && _menu != null && _menu.PointerOverMenu())
+            var panelOpen = (_menu != null && _menu.IsOpen) || (_stats != null && _stats.IsOpen);
+            if (panelOpen || _angler.QteOpen)
+                _window.Fast("panel/qte");
+            if (_menu != null && _menu.PointerOverMenu())
                 _window.PointerOverPet = true;
-            if (_window != null && _stats != null && _stats.PointerOverPanel())
+            if (_stats != null && _stats.PointerOverPanel())
                 _window.PointerOverPet = true;
-        }
 
-        void OnApplicationPause(bool pauseStatus)
-        {
-            if (pauseStatus)
-                Persist();
-        }
+            _critters.SetGullVisiting(_menu != null && _menu.IsOpen);
 
-        void OnApplicationFocus(bool hasFocus)
-        {
-            if (!hasFocus)
-                Persist();
-        }
-
-        /// <summary>
-        /// A new monitor, resolution or taskbar means every screen-derived position is stale: the
-        /// pet's spot along the water, and both panels, which are stored in screen pixels and can
-        /// land off a smaller display.
-        /// </summary>
-        void OnDisplayChanged()
-        {
-            _dragger?.ReapplyForScreen();
-            _menu?.ClampIntoScreen();
-            _stats?.ClampIntoScreen();
+            // The bucket count shows when a catch lands, or while the cursor rests on the bucket.
+            if (_camera != null && _window.CursorValid)
+            {
+                var c = _window.CursorScreen;
+                var w = _camera.ScreenToWorldPoint(new Vector3(c.x, c.y, 0f));
+                w.z = 0f;
+                if (_angler.BucketContains(w))
+                    _hud.FlashBucketCount(0.3f);
+                if (_angler.CatContains(w))
+                    _hud.FlashGiftTimer(0.3f);
+            }
+            _ambience.Suspend(_window.HiddenForFullscreen);
         }
 
         void OnApplicationQuit()
@@ -235,140 +338,58 @@ namespace DeskPond
             CommitActivity();
         }
 
-        /// <summary>Writes the slice in progress, which the interval flush would otherwise lose.</summary>
         void CommitActivity()
         {
             if (_activity == null || config == null)
                 return;
-
             _foreground?.Commit(_activity, RecordTitles);
             _activity.FlushNow(config.retentionDays, config.titleRetentionDays);
         }
 
-        void ResolveRefs()
+        void TickActivity(float dt)
         {
-            if (config == null)
-                config = GameRuntimeSetup.LoadConfig();
-            if (config == null)
-                config = ScriptableObject.CreateInstance<GameConfig>();
-            if (cat == null)
-                cat = FindFirstObjectByType<CatPresenter>();
-            if (basket == null)
-                basket = FindFirstObjectByType<BasketPresenter>();
-            if (worldCamera == null)
-                worldCamera = Camera.main;
-            if (rig == null)
-                rig = FindFirstObjectByType<FishingRig>();
-            if (rig == null && cat != null && basket != null)
-                rig = FishingRig.Create(cat.transform, basket.transform, waterSurfaceY);
-            if (rig != null)
-                rig.ApplyConfig(config);
-
-            _input = FindFirstObjectByType<GlobalInputCounter>();
-            if (_input == null)
-                _input = GlobalInputCounter.Create();
-        }
-
-        /// <summary>
-        /// Drops the pet so its feet rest on the waterline rather than floating above it. The lift
-        /// is measured from the sprite bounds, so new art stays seated without editing the scene.
-        ///
-        /// Runs before PetDragger is created, which caches the pet's resting height on bind.
-        /// </summary>
-        void SeatOnWaterline()
-        {
-            var offset = config != null ? config.petSeatOffset : 0f;
-            Seat(cat != null ? cat.GetComponent<SpriteRenderer>() : null, offset);
-            Seat(basket != null ? basket.GetComponent<SpriteRenderer>() : null, offset);
-        }
-
-        static void Seat(SpriteRenderer sprite, float offset)
-        {
-            if (sprite == null || sprite.sprite == null)
+            if (_activity == null || config == null)
                 return;
-
-            var t = sprite.transform;
-            // sprite.bounds is world space and already includes scale, but it measures the sprite
-            // rect. Art usually carries a row or two of empty pixels underneath, which would leave
-            // the pet visibly hovering, so the padding is measured and taken off.
-            var artBottom = sprite.bounds.min.y + EmptyRowsBelow(sprite.sprite)
-                            / sprite.sprite.pixelsPerUnit * Mathf.Abs(t.lossyScale.y);
-            var lift = WaterlineY + offset - artBottom;
-            t.position = new Vector3(t.position.x, t.position.y + lift, t.position.z);
+            _foreground?.Tick(dt, _activity, config.foregroundPollSeconds, RecordTitles);
+            _activity.Tick(dt, config.retentionDays, config.titleRetentionDays);
         }
 
-        /// <summary>
-        /// Transparent rows between the artwork and the bottom of the sprite rect. Returns 0 when
-        /// the texture cannot be read, which just falls back to seating by the rect.
-        /// </summary>
-        static int EmptyRowsBelow(Sprite sprite)
-        {
-            var texture = sprite.texture;
-            if (texture == null || !texture.isReadable)
-                return 0;
+        // ------------------------------------------------------------------ input -> bait -> bites
 
-            var rect = sprite.textureRect;
-            var w = Mathf.RoundToInt(rect.width);
-            var h = Mathf.RoundToInt(rect.height);
-            if (w <= 0 || h <= 0)
-                return 0;
-
-            var pixels = texture.GetPixels(Mathf.RoundToInt(rect.x), Mathf.RoundToInt(rect.y), w, h);
-            for (var row = 0; row < h; row++)
-            {
-                for (var col = 0; col < w; col++)
-                {
-                    if (pixels[row * w + col].a > 0.01f)
-                        return row;
-                }
-            }
-
-            return 0;
-        }
-
-        /// <summary>Folds this frame's counted clicks and keystrokes into progress toward a bite.</summary>
-        void AccumulateInput()
+        void AccumulateInput(float dt)
         {
             if (_input == null || _save == null)
                 return;
 
             var events = _input.TakeFrameEvents();
+            _pacing?.Tick(dt, events);
+            _activity?.AddInputs(events, _foreground?.CurrentApp, RecordTitles ? _foreground?.CurrentTitle : null);
 
-            // Both of these need every frame, not just busy ones: the pacing model closes a sample
-            // on the clock, and a quiet minute is still part of the record.
-            _pacing?.Tick(Time.deltaTime, events);
-            _activity?.AddInputs(events, _foreground?.CurrentApp,
-                RecordTitles ? _foreground?.CurrentTitle : null);
+            // Bait in the water follows how busy the user is, and fades when they stop.
+            var target = Mathf.Clamp01(_input.Rate / 4f);
+            _bait = Mathf.MoveTowards(_bait, target, dt * (target > _bait ? 0.08f : 0.02f));
+            _pond.SetBait(_bait);
 
             if (events <= 0)
             {
-                TickIdle(Time.deltaTime);
+                TickIdle(dt);
                 return;
             }
 
-            // Any activity breaks the idle streak. Idle rewards require an unbroken stretch, so
-            // they cannot be farmed by nudging the mouse every few minutes.
             IdleSeconds = 0f;
+            _streakLive = true;
             _idleFishGranted = 0;
-            _giftSent = false;
             _save.lifetimeInputs += events;
+            _angler.Crumbs(events);
 
-            // A full basket stops production, but the work still counts toward lifetime stats.
-            if (BasketFull || _state == CatState.Catch)
+            if (BasketFull || _biteDue)
                 return;
-
             _save.inputsTowardCatch += events;
-            _dirty = true;
-
+            MarkDirty(false);
             if (_save.inputsTowardCatch >= _save.nextCatchTarget)
-                TryCatch();
+                _biteDue = true;
         }
 
-        /// <summary>
-        /// Idle time is never saved, so the game has to be running to earn from it. The clock
-        /// runs through each reward instead of resetting, so one long stretch pays fish and a
-        /// gift box. Any input clears it; see AccumulateInput.
-        /// </summary>
         void TickIdle(float dt)
         {
             if (config == null || _save == null)
@@ -379,136 +400,448 @@ namespace DeskPond
             if (earned <= 0f)
                 return;
 
-            // Fish: one per completed idleSecondsPerFish interval.
             var due = Mathf.FloorToInt(earned / Mathf.Max(1f, config.idleSecondsPerFish));
-            if (due > _idleFishGranted && !BasketFull && _state != CatState.Catch)
+            if (due > _idleFishGranted && !BasketFull)
             {
                 _idleFishGranted = due;
-                TryCatch();
+                _biteDue = true;
             }
 
-            // Gift box: once per idle streak, at idleSecondsPerGift.
-            if (!_giftSent && earned >= config.idleSecondsPerGift)
-            {
-                _giftSent = true;
-                Debug.Log($"DeskPond gift: idle={IdleSeconds:0.0}s earned={earned:0.0}s " +
-                          $"threshold={config.idleSecondsPerGift}s " +
-                          $"sinceStart={Time.timeSinceLevelLoad:0.0}s");
-                SpawnGift();
-            }
         }
 
-        /// <summary>
-        /// A welcome gift on a brand new save, so the drifting box is introduced up front rather
-        /// than only after a 30 minute idle stretch. Once only: the box pays coins when every
-        /// skin is owned, so a per-launch gift would be farmable by restarting.
-        /// </summary>
-        System.Collections.IEnumerator WelcomeGift()
+        void TickFishing(float dt)
         {
-            yield return new WaitForSeconds(Mathf.Max(0f, config.welcomeGiftDelaySeconds));
-            Debug.Log("DeskPond: welcome gift (first run).");
-            SpawnGift();
-        }
-
-        /// <summary>The gift box currently on screen, drifting or parked. Null when there is none.</summary>
-        public DriftingGift ActiveGift { get; set; }
-
-        void SpawnGift()
-        {
-            // Only one box at a time. A parked box waits indefinitely for a click, so idle time
-            // would otherwise stack several on the same spot.
-            if (cat == null || worldCamera == null || ActiveGift != null)
+            if (_angler.IsBusy)
                 return;
 
-            DriftingGift.Spawn(this, cat.transform, worldCamera, waterSurfaceY,
-                config.giftDrift, config.giftDriftSeconds);
-        }
+            _save.dryMinutes += dt / 60f;
 
-        /// <summary>Shows the "you got X" bubble above the cat when a gift box is opened.</summary>
-        public void ShowGiftBubble(string reward)
-        {
-            if (_hud != null && cat != null)
-                _hud.ShowBubble("Got " + reward + "!", cat.transform);
-        }
-
-        /// <summary>
-        /// Called by the gift box when it reaches the cat. Unlocks and equips a random skin the
-        /// player does not own; returns its name, or null when everything is already unlocked.
-        /// </summary>
-        public string GrantGiftSkin()
-        {
-            if (_save == null)
-                return null;
-
-            if (!ShopDefs.TryPickUnownedSkin(_save, _rng, out var isCat, out var index))
+            // Line out at all times unless the bucket is full.
+            if (!LineOut && !BasketFull)
             {
-                // Nothing left to unlock, so pay coins instead and the wait still counts.
-                _save.coins += 250;
-                _dirty = true;
-                Persist();
-                RefreshView();
-                return "250c (all skins owned)";
-            }
-
-            ShopDefs.GrantSkin(_save, isCat, index);
-            if (isCat)
-                _save.catSkin = index;
-            else
-                _save.basketSkin = index;
-
-            ApplySkins();
-            _dirty = true;
-            Persist();
-            RefreshView();
-            return (isCat ? "cat skin " : "basket skin ") + ShopDefs.SkinName(isCat, index);
-        }
-
-        void TickState(float dt)
-        {
-            if (_state == CatState.Catch)
-            {
-                _catchElapsed += dt;
-                if (_catchElapsed >= config.catchAnimDuration)
-                    Enter(BasketFull ? CatState.Idle : CatState.Waiting);
+                _angler.Cast(() => _lineOut = true);
                 return;
             }
 
-            if (_state == CatState.Idle && !BasketFull)
-                Enter(CatState.Waiting);
-            else if (_state == CatState.Waiting && BasketFull)
-                Enter(CatState.Idle);
-        }
+            _sinceBite += dt;
+            if (!_biteDue || BasketFull || !LineOut)
+                return;
 
-        void TryCatch()
-        {
-            if (!BasketFull)
-            {
-                _save.basketFish += 1;
-                _save.lifetimeFish += 1;
-                ClampBasket();
-            }
+            // Earned, but the fish take their time: a bite never follows the last one sooner than
+            // the minimum gap, so fast typing cannot fill the bucket in a minute.
+            var gap = (config != null ? config.minSecondsBetweenBites : 90f) * ShopDefs.RodFactor(_save.rodLevel);
+            if (_sinceBite < gap)
+                return;
+            _sinceBite = 0f;
 
+            _biteDue = false;
             _save.inputsTowardCatch = 0;
             RollNextTarget();
-            _dirty = true;
-            Persist();
-            Enter(CatState.Catch);
+
+            var night = _pond.IsNight;
+            var pondId = Looks.Worn(_save, LookSlot.Pond);
+            // A long unbroken stretch of work tilts the odds: rarer tiers, and more golden bites.
+            var tier = StreakTier;
+            if (_rng.NextDouble() < ShopDefs.GoldenChance(_save.rodLevel) + tier * 0.01f)
+            {
+                var prize = Catalog.RollLegendary(_rng, pondId, night);
+                _angler.PlayGolden(prize, Catalog.Get("boot"), (item, won) =>
+                {
+                    Land(item);
+                    if (won)
+                        Ambience.Play(Ambience.Sfx.Coin);
+                }, 3.2f);
+            }
+            else
+            {
+                var item = Catalog.RollNormal(_rng, pondId, night, _save.lureLevel + tier, _pond.Weather,
+                    Weather.Season(System.DateTime.Now));
+                _angler.PlayCatch(item, Caption(item), () => Land(item));
+            }
+
+            _lineOut = false;
         }
 
+        bool _lineOut;
+        bool LineOut => _lineOut;
+
+        void Land(CatchDef item)
+        {
+            if (item == null)
+                return;
+            var cm = item.MaxCm > 0f ? Mathf.Round(Mathf.Lerp(item.MinCm, item.MaxCm, (float)_rng.NextDouble()) * 10f) / 10f : 0f;
+            _save.Record(item.Id, cm);
+            if (!BasketFull)
+                _save.catches.Add(item.Id);
+            _save.lifetimeFish++;
+            _save.dryMinutes = 0f;
+            _angler.SetBucketFill(_save.catches.Count, Capacity);
+            _hud?.FlashBucketCount(3f);
+            AnnounceSets();
+            MarkDirty(true);
+            _menu?.Refresh();
+        }
+
+        /// <summary>Hands out the prize for any dex set that has just been completed.</summary>
+        void AnnounceSets()
+        {
+            var done = DexSets.ClaimFinished(_save);
+            if (done == null)
+                return;
+            foreach (var set in done)
+            {
+                Debug.Log("DeskPond: dex set complete: " + set.Id);
+                _hud?.ShowBubble("Set complete: " + set.Name + "! Got " + set.Reward.Name + ".",
+                    _angler != null ? _angler.CatTransform : null, 5f);
+            }
+            Ambience.Play(Ambience.Sfx.Coin);
+            MarkDirty(true);
+        }
+
+        // ------------------------------------------------------------------ focus streak
+
         /// <summary>
-        /// Prices the next fish. Once the pacing model has seen enough active minutes it sets the
-        /// cost from this user's own input rate; until then, and whenever adaptive pacing is off,
-        /// it falls back to the fixed range so a brand new save still behaves.
+        /// Counts the current stretch of work. It keeps running through short pauses and ends
+        /// after two idle minutes; ending a long one gets a word from the cat. Only the count of
+        /// input events is ever looked at, never what was typed.
         /// </summary>
+        void TickStreak(float dt)
+        {
+            if (_save == null || !_streakLive)
+                return;
+
+            if (IdleSeconds < 120f)
+            {
+                _streak += dt;
+                _angler.Excitement = StreakTier / 3f;
+                return;
+            }
+
+            var seconds = Mathf.Max(0f, _streak - 120f);
+            if (seconds >= 900f)
+            {
+                Notify(Mathf.FloorToInt(seconds / 60f) + " min streak! Nice work.");
+                _angler.PlayHappy();
+            }
+            if (seconds > _save.bestStreak)
+            {
+                _save.bestStreak = seconds;
+                MarkDirty(false);
+            }
+            _streak = 0f;
+            _streakLive = false;
+            _angler.Excitement = 0f;
+        }
+
+        // ------------------------------------------------------------------ weather, day rollover
+
+        /// <summary>Things that only need looking at every so often: the sky and the date.</summary>
+        void TickSlow(float dt)
+        {
+            _slowPoll -= dt;
+            if (_slowPoll > 0f)
+                return;
+            _slowPoll = 20f;
+
+            var now = Weather.Now;
+            if (now != _weatherShown)
+            {
+                _weatherShown = now;
+                _pond.SetWeather(now);
+                if (!_angler.IsBusy)
+                    Notify(Weather.Announce(now));
+            }
+            EnsureQuest();
+        }
+
+        // ------------------------------------------------------------------ deep-water visitors
+
+        void TickVisitors(float dt)
+        {
+            if (!_pond.CanHostVisitor)
+                return;
+            _visitorClock -= dt;
+            if (_visitorClock > 0f)
+                return;
+            _visitorClock = 360f + (float)_rng.NextDouble() * 420f;
+            _pond.SpawnVisitor(_rng.Next(2) == 0 ? 1 : 2);
+            Debug.Log("DeskPond: something big is passing through the deep water.");
+        }
+
+        void GreetVisitor()
+        {
+            var kind = _pond.ClaimVisitor();
+            if (kind == 0)
+                return;
+            if (kind == 2 && !BasketFull)
+            {
+                Land(Catalog.Get("pearl"));
+                Notify("A jellyfish dropped a pearl!");
+            }
+            else
+            {
+                var tip = (kind == 1 ? 40 : 70) + _rng.Next(41);
+                _save.coins += tip;
+                Notify(kind == 1 ? "The whale left a tip! +" + tip : "The jellyfish left +" + tip + "!");
+                MarkDirty(true);
+            }
+            Ambience.Play(Ambience.Sfx.Coin);
+            _angler.PlayHappy();
+        }
+
+        // ------------------------------------------------------------------ petting and the bond
+
+        static int Stamp(System.DateTime d) => d.Year * 10000 + d.Month * 100 + d.Day;
+
+        static System.DateTime FromStamp(int s) =>
+            new System.DateTime(Mathf.Max(1, s / 10000), Mathf.Clamp(s / 100 % 100, 1, 12), Mathf.Clamp(s % 100, 1, 28));
+
+        /// <summary>The bond fades a little for each day the cat goes unpetted.</summary>
+        void StartBond()
+        {
+            if (_save.lastPetDay <= 0)
+                return;
+            var today = System.DateTime.Now.Date;
+            var days = (int)(today - FromStamp(_save.lastPetDay)).TotalDays;
+            if (days < 2)
+                return;
+            _save.affection = Mathf.Max(0f, _save.affection - (days - 1) * 6f);
+            // Move the mark up to yesterday so the same days are not charged again next launch.
+            _save.lastPetDay = Stamp(today.AddDays(-1));
+            MarkDirty(false);
+        }
+
+        void PetCat()
+        {
+            _angler.PlayPet();
+            Ambience.Play(Ambience.Sfx.Meow, 0.8f);
+            if (_save == null)
+                return;
+
+            if (_petCooldown <= 0f)
+            {
+                var before = BondLevel;
+                var today = Stamp(System.DateTime.Now);
+                // The first scratch of the day counts for more.
+                _save.affection = Mathf.Min(100f, _save.affection + (_save.lastPetDay == today ? 3f : 8f));
+                _save.lastPetDay = today;
+                _petCooldown = 20f;
+                if (BondLevel > before)
+                    Notify("Bond level " + BondLevel + "! Purr.");
+                MarkDirty(false);
+            }
+
+            // A cat that likes you brings you things.
+            if (BondLevel >= 3 && _petGiftCooldown <= 0f && _rng.NextDouble() < 0.25)
+            {
+                var found = 5 + _rng.Next(16);
+                _save.coins += found;
+                _petGiftCooldown = 900f;
+                Notify("The cat found you " + found + " dried fish.");
+                Ambience.Play(Ambience.Sfx.Coin, 0.6f);
+                MarkDirty(true);
+            }
+        }
+
+        // ------------------------------------------------------------------ the gull's daily request
+
+        /// <summary>What a finished request pays, on top of the normal sale price.</summary>
+        public int QuestReward
+        {
+            get
+            {
+                var d = Catalog.Get(_save != null ? _save.questItem : null);
+                return d == null ? 0 : Mathf.Max(40, d.Price * _save.questNeed * 3 + 30);
+            }
+        }
+
+        /// <summary>Picks today's request. The same day always gives the same one.</summary>
+        void EnsureQuest()
+        {
+            if (_save == null)
+                return;
+            var today = Stamp(System.DateTime.Now);
+            if (_save.questDay == today && Catalog.Get(_save.questItem) != null)
+                return;
+
+            var pool = new List<CatchDef>();
+            foreach (var d in Catalog.All)
+                if ((d.Rarity == Rarity.Common || d.Rarity == Rarity.Uncommon) && !d.Weather.HasValue && d.Season < 0
+                    && !d.NightOnly && d.Pond == null)
+                    pool.Add(d);
+            var day = new System.Random(today);
+            var pick = pool[day.Next(pool.Count)];
+            _save.questDay = today;
+            _save.questItem = pick.Id;
+            _save.questNeed = pick.Rarity == Rarity.Common ? 3 + day.Next(2) : 2;
+            _save.questHave = 0;
+            _save.questDone = false;
+            MarkDirty(false);
+        }
+
+        void QuestCount(string id, int count)
+        {
+            if (_save.questDone || count <= 0 || id != _save.questItem)
+                return;
+            _save.questHave = Mathf.Min(_save.questNeed, _save.questHave + count);
+            if (_save.questHave < _save.questNeed)
+                return;
+            _save.questDone = true;
+            var pay = QuestReward;
+            _save.coins += pay;
+            Notify("Gull: a deal's a deal! +" + pay);
+        }
+
+        // ------------------------------------------------------------------ letters from the cat
+
+        /// <summary>Play time between letters. -mailevery=N overrides it for testing.</summary>
+        static readonly float LetterEverySeconds = ReadMailOverride();
+
+        static float ReadMailOverride()
+        {
+            foreach (var a in System.Environment.GetCommandLineArgs())
+                if (a.StartsWith("-mailevery=") && float.TryParse(a.Substring(11), out var s))
+                    return Mathf.Max(10f, s);
+            return 2700f;
+        }
+
+        void TickLetters(float dt)
+        {
+            if (_save == null || _writing || ActiveMail != null || (_letter != null && _letter.IsOpen))
+                return;
+            _save.letterSeconds += dt;
+            // The very first letter comes early, so the bottle is met in the first session.
+            var due = _save.letters.Count == 0 ? Mathf.Min(240f, LetterEverySeconds) : LetterEverySeconds;
+            if (_save.letterSeconds < due || _angler.IsBusy || _angler.IsDragging)
+                return;
+            _save.letterSeconds = 0f;
+            StartCoroutine(WriteLetter());
+        }
+
+        /// <summary>The cat gets its notebook out for a few seconds, then tosses the bottle.</summary>
+        System.Collections.IEnumerator WriteLetter()
+        {
+            _writing = true;
+            _noteUntil = Time.time + 4f;
+            yield return new WaitForSeconds(4f);
+            while (_angler.IsBusy)
+                yield return null;
+
+            var ctx = LetterNow();
+            var letter = CatLetters.Pick(_save, ctx, _rng);
+            if (letter.Answers != null)
+                _save.lastReply = null;
+            ActiveMail = MailBottle.Spawn(this, _angler.CatTransform, letter, CatLetters.Render(letter, ctx));
+            MarkDirty(false);
+            _writing = false;
+            Debug.Log("DeskPond: the cat sent a letter: " + letter.Id);
+        }
+
+        LetterContext LetterNow()
+        {
+            var now = System.DateTime.Now;
+            var found = 0;
+            foreach (var d in Catalog.All)
+                if (_save.DexCount(d.Id) > 0)
+                    found++;
+            var last = _save.catches.Count > 0 ? Catalog.Get(_save.catches[_save.catches.Count - 1]) : null;
+            return new LetterContext
+            {
+                Hour = _pond.Hour,
+                Weather = _pond.Weather,
+                Season = Weather.Season(now),
+                Days = _save.firstRunDay > 0 ? Mathf.Max(0, (int)(now.Date - FromStamp(_save.firstRunDay)).TotalDays) + 1 : 1,
+                Fish = _save.lifetimeFish,
+                DexFound = found,
+                DexTotal = Catalog.All.Length,
+                StreakMinutes = _streak / 60f,
+                BestStreakMinutes = _save.bestStreak / 60f,
+                Bond = BondLevel,
+                BucketFull = BasketFull,
+                DryMinutes = _save.dryMinutes,
+                LastCatch = last != null ? last.Name : null,
+                Coins = _save.coins,
+            };
+        }
+
+        Vector2 LetterAnchor()
+        {
+            var p = _camera.WorldToScreenPoint(_angler.CatTransform.position);
+            return new Vector2(p.x, p.y + 34f * _window.Zoom);
+        }
+
+        void OpenMail()
+        {
+            var mail = ActiveMail;
+            if (mail == null)
+                return;
+            var letter = mail.Letter;
+            var text = mail.Text;
+            mail.Take();
+            ActiveMail = null;
+            Ambience.Play(Ambience.Sfx.Plop, 0.6f);
+
+            _save.letters.Add(CatLetters.Pack(letter.Id, text));
+            while (_save.letters.Count > 40)
+                _save.letters.RemoveAt(0);
+            MarkDirty(true);
+
+            _letter.Show(text, letter.Replies, LetterAnchor(), tag =>
+            {
+                if (tag != null)
+                {
+                    // The cat answers a reply within a couple of minutes, not next hour.
+                    _save.lastReply = tag;
+                    _save.letterSeconds = Mathf.Max(_save.letterSeconds, LetterEverySeconds - 120f);
+                    Notify("Sent it back!");
+                    MarkDirty(true);
+                }
+                _angler.PlayHappy(1f, false);
+            });
+        }
+
+        /// <summary>Re-reads a kept letter from the mail list.</summary>
+        public void ReadLetter(int index)
+        {
+            if (_save == null || index < 0 || index >= _save.letters.Count)
+                return;
+            _letter.Show(CatLetters.TextOf(_save.letters[index]), null, LetterAnchor(), null);
+        }
+
+        string Caption(CatchDef item)
+        {
+            switch (item.Id)
+            {
+                case "bottle":
+                    var n = _rng.Next(Catalog.BottleNotes.Length);
+                    if (!_save.notesFound.Contains(n))
+                        _save.notesFound.Add(n);
+                    return "\"" + Catalog.BottleNotes[n] + "\"";
+                case "ghost":
+                    return "Ghost file: " + GhostName();
+                default:
+                    return item.Name + "!";
+            }
+        }
+
+        string GhostName()
+        {
+            if (_save.recycleGhosts)
+            {
+                _ghosts ??= RecycleBin.ReadNames(40);
+                if (_ghosts.Count > 0)
+                    return _ghosts[_rng.Next(_ghosts.Count)];
+            }
+            return Catalog.GhostNames[_rng.Next(Catalog.GhostNames.Length)];
+        }
+
         void RollNextTarget()
         {
             var level = _save.rodLevel;
             var scale = config != null ? Mathf.Max(0.01f, config.inputCostScale) : 1f;
-
             if (config != null && config.adaptivePacing && _pacing != null
                 && _pacing.TryGetTarget(config.minutesPerFish, ShopDefs.RodFactor(level),
-                    config.pacingMinInputs, config.pacingMaxInputs, config.pacingSpread, _rng,
-                    out var adaptive))
+                    config.pacingMinInputs, config.pacingMaxInputs, config.pacingSpread, _rng, out var adaptive))
             {
                 _save.nextCatchTarget = Mathf.Max(1, Mathf.RoundToInt(adaptive * scale));
                 return;
@@ -518,294 +851,385 @@ namespace DeskPond
             _save.nextCatchTarget = Mathf.Max(1, Mathf.RoundToInt(roll * scale));
         }
 
-        void StartActivityLog()
+        // ------------------------------------------------------------------ moods and events
+
+        void TickMoods(float dt)
         {
-            if (config == null || !config.trackActivity)
+            if (_angler.IsBusy)
                 return;
 
-            _activity = ActivityLog.Load();
-            _foreground = new ForegroundWatcher();
-
-            if (!_foreground.IsSupported)
-                Debug.Log("DeskPond activity: foreground sampling unavailable on this platform.");
+            _moodClock += dt;
+            Angler.Mood mood;
+            if (Time.time < _noteUntil)
+                mood = Angler.Mood.Note;
+            else if (BasketFull)
+                mood = Angler.Mood.Doze;
+            else if (_save.dryMinutes >= 30f)
+                // A long dry spell: alternate between doing the books and giving up to sunbathe.
+                mood = Mathf.FloorToInt(_moodClock / 180f) % 2 == 0 ? Angler.Mood.Note : Angler.Mood.Sun;
+            else if (IdleSeconds > 150f)
+                mood = Angler.Mood.Doze;
+            else if (_save.affection < 15f)
+                // Not petted in days: a cross little face until someone makes it up to them.
+                mood = Angler.Mood.Sulk;
             else
-                Debug.Log($"DeskPond activity: keep={config.retentionDays}d " +
-                          $"titles={(RecordTitles ? config.titleRetentionDays + "d" : "off")} " +
-                          $"poll={config.foregroundPollSeconds}s file={ActivityLog.FilePath}");
+                mood = Angler.Mood.Wait;
+            _angler.SetMood(mood);
         }
 
-        void TickActivity(float dt)
+        /// <summary>A full bucket left alone too long attracts a crow.</summary>
+        void TickThief(float dt)
         {
-            if (_activity == null || config == null)
-                return;
-
-            _foreground?.Tick(dt, _activity, config.foregroundPollSeconds, RecordTitles);
-            _activity.Tick(dt, config.retentionDays, config.titleRetentionDays);
-        }
-
-        /// <summary>Opens the activity panel beside the basket, from the shop's stats button.</summary>
-        void ToggleStats()
-        {
-            if (_stats == null)
-                return;
-
-            var anchor = basket != null && worldCamera != null
-                ? (Vector2)worldCamera.WorldToScreenPoint(basket.transform.position)
-                : new Vector2(Screen.width * 0.5f, Screen.height * 0.4f);
-            _stats.ToggleAt(anchor);
-        }
-
-        /// <summary>Deletes the activity history. Wired to the panel so it is not a hidden file.</summary>
-        public void ClearActivity()
-        {
-            _activity?.Clear();
-            AppIcons.ClearCache();
-            Debug.Log("DeskPond activity: history cleared.");
-        }
-
-        public void SellAll()
-        {
-            if (_save == null || _save.basketFish <= 0)
-                return;
-
-            _save.coins += _save.basketFish * FishPrice;
-            _save.basketFish = 0;
-            _dirty = true;
-            Persist();
-
-            if (_state == CatState.Idle)
-                Enter(CatState.Waiting);
-
-            RefreshView();
-        }
-
-        public bool TryBuyUpgrade(UpgradeKind kind)
-        {
-            if (_save == null)
-                return false;
-
-            var level = ShopDefs.Level(_save, kind);
-            var cost = ShopDefs.NextCost(kind, level);
-            if (cost < 0 || _save.coins < cost)
-                return false;
-
-            _save.coins -= cost;
-            ShopDefs.SetLevel(_save, kind, level + 1);
-
-            // A shorter rod target should take effect immediately rather than after the current fish.
-            if (kind == UpgradeKind.Rod)
-                _save.nextCatchTarget = Mathf.Max(_save.inputsTowardCatch + 1,
-                    Mathf.RoundToInt(_save.nextCatchTarget * ShopDefs.RodFactor(1)));
-
-            _dirty = true;
-            Persist();
-            RefreshView();
-            return true;
-        }
-
-        public bool TryBuySkin(bool isCat, int index)
-        {
-            if (_save == null)
-                return false;
-
-            var skins = ShopDefs.Skins(isCat);
-            if (index < 0 || index >= skins.Length)
-                return false;
-
-            // Owned skins re-equip for free; unowned ones are bought once and then kept.
-            if (!ShopDefs.OwnsSkin(_save, isCat, index))
+            if (!BasketFull || _critters.CrowActive)
             {
-                if (_save.coins < skins[index].Cost)
-                    return false;
-                _save.coins -= skins[index].Cost;
-                ShopDefs.GrantSkin(_save, isCat, index);
+                if (!BasketFull)
+                    _fullSeconds = 0f;
+                return;
             }
 
-            if (isCat)
-                _save.catSkin = index;
-            else
-                _save.basketSkin = index;
-
-            ApplySkins();
-            _dirty = true;
-            Persist();
-            RefreshView();
-            return true;
-        }
-
-        void ApplySkins()
-        {
-            if (_save == null)
+            _fullSeconds += dt;
+            if (_fullSeconds < 180f)
+                return;
+            _crowRoll -= dt;
+            if (_crowRoll > 0f)
+                return;
+            _crowRoll = 60f;
+            if (_rng.NextDouble() > 0.3)
                 return;
 
-            if (cat != null)
-                cat.SetSkin(_save.catSkin);
-            if (basket != null)
-                basket.SetSkin(_save.basketSkin);
+            _critters.SendCrow(StealOne, stolen =>
+            {
+                if (stolen)
+                {
+                    _angler.PlayAngry();
+                    _hud.ShowBubble("Hey! Thief!", _angler.CatTransform, 2.5f);
+                }
+                else
+                {
+                    _angler.PlayHappy();
+                }
+            });
         }
 
-        void Enter(CatState next)
+        string StealOne()
         {
-            _state = next;
-            if (next == CatState.Catch)
-                _catchElapsed = 0f;
-            if (cat != null)
-                cat.SetState(next);
-            if (rig != null)
+            for (var i = _save.catches.Count - 1; i >= 0; i--)
             {
-                rig.SetWaiting(next == CatState.Waiting);
-                if (next == CatState.Catch)
-                    rig.PlayCatch(config.catchAnimDuration);
+                var def = Catalog.Get(_save.catches[i]);
+                if (def == null || !def.IsFish)
+                    continue;
+                _save.catches.RemoveAt(i);
+                _angler.SetBucketFill(_save.catches.Count, Capacity);
+                MarkDirty(true);
+                _menu?.Refresh();
+                return def.Icon;
+            }
+            return null;
+        }
+
+        System.Collections.IEnumerator WelcomeGift()
+        {
+            yield return new WaitForSeconds(Mathf.Max(0f, config.welcomeGiftDelaySeconds));
+            SpawnGift();
+        }
+
+        void SpawnGift()
+        {
+            if (ActiveGift != null || _angler == null)
+                return;
+            DriftingGift.Spawn(this, _angler.CatTransform, _camera, _pond.SurfaceWorldY,
+                config.giftDrift, config.giftDriftSeconds);
+        }
+
+        /// <summary>A short message in the cat's speech bubble (sales, purchases).</summary>
+        public void Notify(string text) => _hud?.ShowBubble(text, _angler != null ? _angler.CatTransform : null, 2.5f);
+
+        public void ShowGiftBubble(string reward) => _hud?.ShowBubble("Got " + reward + "!", _angler.CatTransform);
+
+        /// <summary>Opens a gift box: a random look the player does not own yet, or dried fish.</summary>
+        public string GrantGiftSkin()
+        {
+            if (!Looks.TryPickUnowned(_save, _rng, out var slot, out var def))
+            {
+                _save.coins += 250;
+                MarkDirty(true);
+                return "250 dried fish";
             }
 
-            RefreshView();
+            Looks.Grant(_save, slot, def.Id);
+            Looks.Wear(_save, slot, def.Id);
+            ApplyLooks();
+            MarkDirty(true);
+            return def.Name;
         }
 
-        /// <summary>Primary press, from the OS while the overlay is up, otherwise from Unity.</summary>
-        bool PrimaryPressed() =>
-            _window != null && _window.IsActive ? _window.PrimaryPressedThisFrame : WasPrimaryPressed();
+        // ------------------------------------------------------------------ clicks
 
-        Vector2 Pointer() =>
-            _window != null && _window.IsActive && _window.CursorValid
-                ? _window.CursorScreen
-                : PointerScreen();
-
-        void HandleClick()
+        void HandleClicks()
         {
-            if (!PrimaryPressed() || basket == null || worldCamera == null)
+            if (!_window.PrimaryPressedThisFrame || _camera == null)
+                return;
+            var screen = _window.CursorScreen;
+            if (PointerOnPanel(screen))
                 return;
 
-            var screen = Pointer();
-
-            // Clicks landing on either panel are handled by the UI, not by the world.
-            if (_menu != null && _menu.ContainsScreenPoint(screen))
+            var world = _camera.ScreenToWorldPoint(new Vector3(screen.x, screen.y, 0f));
+            world.z = 0f;
+            if (_pond.IsDraggingGrip)
                 return;
-            if (_stats != null && _stats.ContainsScreenPoint(screen))
-                return;
-
-            // A parked gift box takes priority; it sits right next to the cat and basket.
-            var worldPoint = worldCamera.ScreenToWorldPoint(new Vector3(screen.x, screen.y, 0f));
-            worldPoint.z = 0f;
-            if (ActiveGift != null && ActiveGift.ContainsWorldPoint(worldPoint))
+            if (ActiveGift != null && ActiveGift.ContainsWorldPoint(world))
             {
-                if (_logInput)
-                    Debug.Log("DeskPond click: opened gift box");
                 ActiveGift.OpenNow();
                 return;
             }
 
-            var ray = worldCamera.ScreenPointToRay(screen);
-            var hit = Physics2D.GetRayIntersection(ray, 100f);
-            Collider2D collider = hit.collider;
-            if (collider == null)
+            if (ActiveMail != null && ActiveMail.ContainsWorldPoint(world))
             {
-                var world = worldCamera.ScreenToWorldPoint(new Vector3(screen.x, screen.y, 0f));
-                collider = Physics2D.OverlapPoint(world);
+                OpenMail();
+                return;
             }
 
-            var onBasket = collider != null && collider.GetComponentInParent<BasketPresenter>() == basket;
-
-            if (_logInput)
-                Debug.Log($"DeskPond click: screen=({screen.x:0},{screen.y:0}) " +
-                          $"hit={(collider != null ? collider.name : "NULL")} onBasket={onBasket} " +
-                          $"menuOpen={(_menu != null && _menu.IsOpen)}");
-
-            if (onBasket && _menu != null)
+            if (_pond.VisitorContains(world))
             {
-                var basketScreen = worldCamera.WorldToScreenPoint(basket.transform.position);
-                _menu.ToggleAt(new Vector2(basketScreen.x, basketScreen.y));
-
-                if (_logInput)
-                    Debug.Log("DeskPond menu -> open=" + _menu.IsOpen);
+                GreetVisitor();
+                return;
             }
+
+            if (_critters.CrowContains(world))
+            {
+                _critters.Shoo();
+                return;
+            }
+
         }
 
-        /// <summary>
-        /// Whether a screen point should capture clicks instead of passing them to the desktop:
-        /// the open panel, or the pet itself. The pet's colliders are expanded by a small margin so
-        /// the window has already stopped being click-through by the time the cursor lands on it.
-        /// </summary>
+        public bool PointerOnPanel(Vector2 screen) =>
+            (_menu != null && _menu.ContainsScreenPoint(screen)) || (_stats != null && _stats.ContainsScreenPoint(screen))
+            || (_letter != null && _letter.ContainsScreenPoint(screen));
+
         bool ScreenPointInteractive(Vector2 screen)
         {
             if (_menu != null && (_menu.IsInteracting || _menu.ContainsScreenPoint(screen)))
                 return true;
-
             if (_stats != null && (_stats.IsInteracting || _stats.ContainsScreenPoint(screen)))
                 return true;
-
-            if (worldCamera == null)
+            if (_letter != null && _letter.ContainsScreenPoint(screen))
+                return true;
+            if (_camera == null || _angler == null)
                 return false;
 
-            var world = worldCamera.ScreenToWorldPoint(new Vector3(screen.x, screen.y, 0f));
+            var world = _camera.ScreenToWorldPoint(new Vector3(screen.x, screen.y, 0f));
             world.z = 0f;
-
-            // A parked gift box must also capture clicks, or it cannot be opened.
             if (ActiveGift != null && ActiveGift.ContainsWorldPoint(world))
                 return true;
-
-            return OverlapsWithMargin(cat != null ? cat.GetComponent<Collider2D>() : null, world)
-                   || OverlapsWithMargin(basket != null ? basket.GetComponent<Collider2D>() : null, world);
-        }
-
-        static bool OverlapsWithMargin(Collider2D col, Vector3 world)
-        {
-            if (col == null)
-                return false;
-            var bounds = col.bounds;
-            bounds.Expand(new Vector3(0.35f, 0.35f, 1000f));
-            return bounds.Contains(world);
-        }
-
-        static bool WasPrimaryPressed()
-        {
-            var mouse = Mouse.current;
-            if (mouse != null && mouse.leftButton.wasPressedThisFrame)
+            if (ActiveMail != null && ActiveMail.ContainsWorldPoint(world))
                 return true;
-
-            var touch = Touchscreen.current;
-            return touch != null && touch.primaryTouch.press.wasPressedThisFrame;
+            if (_pond.VisitorContains(world))
+                return true;
+            if (_critters.CrowContains(world) || _pond.GripContains(world))
+                return true;
+            return _angler.Contains(world) || _angler.IsDragging;
         }
 
-        static Vector2 PointerScreen()
+        void ToggleMenu()
         {
-            var mouse = Mouse.current;
-            if (mouse != null)
-                return mouse.position.ReadValue();
-
-            var touch = Touchscreen.current;
-            return touch != null ? touch.primaryTouch.position.ReadValue() : Vector2.zero;
+            if (_menu == null)
+                return;
+            _menu.ToggleAt(_camera.WorldToScreenPoint(_angler.BucketTransform.position));
         }
 
-        void ClampBasket()
+        public void ToggleStats()
         {
-            if (_save.basketFish < 0)
-                _save.basketFish = 0;
-            if (_save.basketFish > Capacity)
-                _save.basketFish = Capacity;
+            if (_stats == null)
+                return;
+            var anchor = _camera.WorldToScreenPoint(_angler.BucketTransform.position);
+            _stats.ToggleAt(anchor);
         }
 
-        /// <summary>Progress changes every keystroke, so writes are throttled instead of immediate.</summary>
+        public void ClearActivity()
+        {
+            _activity?.Clear();
+            AppIcons.ClearCache();
+        }
+
+        // ------------------------------------------------------------------ shop
+
+        public int BucketValue()
+        {
+            var total = 0;
+            foreach (var id in _save.catches)
+            {
+                var d = Catalog.Get(id);
+                if (d != null)
+                    total += d.Price;
+            }
+            return total;
+        }
+
+        public void SellAll()
+        {
+            if (_save.catches.Count == 0)
+                return;
+            _save.coins += BucketValue();
+            var wanted = 0;
+            foreach (var id in _save.catches)
+                if (id == _save.questItem)
+                    wanted++;
+            _save.catches.Clear();
+            QuestCount(_save.questItem, wanted);
+            _angler.SetBucketFill(0, Capacity);
+            Ambience.Play(Ambience.Sfx.Coin);
+            MarkDirty(true);
+        }
+
+        public void SellAt(int index)
+        {
+            if (index < 0 || index >= _save.catches.Count)
+                return;
+            var d = Catalog.Get(_save.catches[index]);
+            _save.coins += d != null ? d.Price : 0;
+            _save.catches.RemoveAt(index);
+            if (d != null)
+                QuestCount(d.Id, 1);
+            _angler.SetBucketFill(_save.catches.Count, Capacity);
+            Ambience.Play(Ambience.Sfx.Coin, 0.6f);
+            MarkDirty(true);
+        }
+
+        /// <summary>Moves a live fish from the bucket into the desktop tank.</summary>
+        public bool MoveToTank(int index)
+        {
+            if (index < 0 || index >= _save.catches.Count || _save.tank.Count >= ShopDefs.TankCapacity)
+                return false;
+            var d = Catalog.Get(_save.catches[index]);
+            if (d == null || !d.IsFish)
+                return false;
+            _save.tank.Add(d.Id);
+            _save.catches.RemoveAt(index);
+            _angler.SetBucketFill(_save.catches.Count, Capacity);
+            ApplySettings();
+            MarkDirty(true);
+            return true;
+        }
+
+        public void ReleaseFromTank(int index)
+        {
+            if (index < 0 || index >= _save.tank.Count)
+                return;
+            _save.tank.RemoveAt(index);
+            ApplySettings();
+            MarkDirty(true);
+        }
+
+        public bool TryBuyUpgrade(UpgradeKind kind)
+        {
+            var level = ShopDefs.Level(_save, kind);
+            var cost = ShopDefs.NextCost(kind, level);
+            if (cost < 0 || _save.coins < cost)
+                return false;
+            _save.coins -= cost;
+            ShopDefs.SetLevel(_save, kind, level + 1);
+            if (kind == UpgradeKind.Rod)
+                _save.nextCatchTarget = Mathf.Max(_save.inputsTowardCatch + 1,
+                    Mathf.RoundToInt(_save.nextCatchTarget * ShopDefs.RodFactor(1)));
+            Ambience.Play(Ambience.Sfx.Coin);
+            ApplyLooks();
+            MarkDirty(true);
+            return true;
+        }
+
+        /// <summary>Wardrobe tile clicked: buy it if needed, then wear it.</summary>
+        public bool TryWear(LookSlot slot, LookDef def)
+        {
+            if (def == null)
+                return false;
+            if (slot == LookSlot.Pond && def is PondDef pd)
+            {
+                var boat = Looks.Find(Looks.Boats, Looks.Worn(_save, LookSlot.Boat));
+                if (boat.Tier < pd.MinBoatTier)
+                    return false;
+            }
+
+            if (!Looks.Owns(_save, slot, def.Id))
+            {
+                if (def.RewardOnly || _save.coins < def.Cost)
+                    return false;
+                _save.coins -= def.Cost;
+                Looks.Grant(_save, slot, def.Id);
+                Ambience.Play(Ambience.Sfx.Coin);
+            }
+
+            Looks.Wear(_save, slot, def.Id);
+            ApplyLooks();
+            _angler.PlayHappy(0.8f, slot != LookSlot.Pond);
+            MarkDirty(true);
+            return true;
+        }
+
+        void ApplyLooks()
+        {
+            _angler.ApplyLooks(_save);
+            _pond.SetTheme(Looks.Find(Looks.Ponds, Looks.Worn(_save, LookSlot.Pond)));
+        }
+
+        // ------------------------------------------------------------------ settings
+
+        public void ApplySettings()
+        {
+            _pond.SetFullWidth(_save.fullPond);
+            _window.SetPondMode(_save.fullPond);
+            _ambience.SetEnabled(_save.soundOn, _save.volume);
+            _window.SetHideInFullscreen(_save.hideInFullscreen);
+        }
+
+        public void SetSound(bool on) { _save.soundOn = on; ApplySettings(); MarkDirty(true); }
+        public void SetVolume(float v) { _save.volume = Mathf.Clamp01(v); ApplySettings(); MarkDirty(true); }
+        public void SetFullPond(bool on) { _save.fullPond = on; ApplySettings(); MarkDirty(true); }
+        public void SetHideFullscreen(bool on) { _save.hideInFullscreen = on; ApplySettings(); MarkDirty(true); }
+
+        public void SetRecycleGhosts(bool on)
+        {
+            _save.recycleGhosts = on;
+            _ghosts = null;
+            MarkDirty(true);
+        }
+
+        public void SetSizeStep(int step)
+        {
+            _save.sizeStep = Mathf.Clamp(step, -2, 3);
+            _window.SetSizeStep(_save.sizeStep);
+            MarkDirty(true);
+        }
+
+        public void Quit()
+        {
+            Persist();
+#if UNITY_EDITOR
+            UnityEditor.EditorApplication.isPlaying = false;
+#else
+            Application.Quit();
+#endif
+        }
+
+        // ------------------------------------------------------------------ persistence
+
+        public void MarkDirty(bool now)
+        {
+            _dirty = true;
+            if (now)
+            {
+                Persist();
+                _menu?.Refresh();
+            }
+        }
+
         void TickAutosave(float dt)
         {
             if (!_dirty)
                 return;
-
             _saveCooldown -= dt;
             if (_saveCooldown <= 0f)
-            {
                 Persist();
-                _saveCooldown = 10f;
-            }
-        }
-
-        void RefreshView()
-        {
-            if (basket != null)
-                basket.SetFull(BasketFull);
-            if (_hud != null)
-                _hud.Refresh(this);
-            if (_menu != null)
-                _menu.Refresh();
         }
 
         void Persist()
@@ -817,36 +1241,58 @@ namespace DeskPond
             _saveCooldown = 10f;
         }
 
-        [ContextMenu("Force Catch")]
-        void ContextCatch()
+        /// <summary>Snapshot mode: dress the pet and set the scene without spending anything.</summary>
+        public void DebugLook(string coat, string hat, string boat, string pond, int depth, float hour, bool menu,
+            PondMenu.Tab tab = PondMenu.Tab.Wardrobe)
         {
-            if (_save != null)
-                TryCatch();
+            Looks.Wear(_save, LookSlot.Coat, coat);
+            Looks.Wear(_save, LookSlot.Hat, hat);
+            Looks.Wear(_save, LookSlot.Boat, boat);
+            Looks.Wear(_save, LookSlot.Pond, pond);
+            _pond.SetHourOverride(hour);
+            _save.catches.Clear();
+            _save.catches.AddRange(new[] { "carp", "koi", "boot", "bluegill", "bottle" });
+            ApplyLooks();
+            SetPondDepth(depth);
+            _bait = 0.8f;
+            _save.tank.Clear();
+            _save.tank.AddRange(new[] { "koi", "goldfish", "golden_koi", "bluegill" });
+            if (menu)
+                _menu.OpenTab(tab, _camera.WorldToScreenPoint(_angler.BucketTransform.position));
+            else
+                _menu.Close();
         }
 
-        [ContextMenu("Sell All")]
-        void ContextSell() => SellAll();
+        /// <summary>Snapshot mode: a sky, something in the deep water, and a letter waiting.</summary>
+        public void DebugScene(WeatherKind weather, int visitor, bool mail)
+        {
+            Weather.Forced = weather;
+            _weatherShown = weather;
+            _pond.SetWeather(weather);
+            _pond.ClearVisitor();
+            if (visitor != 0)
+                _pond.SpawnVisitor(visitor);
+            if (mail && ActiveMail == null)
+            {
+                var letter = CatLetters.Get("q_day");
+                ActiveMail = MailBottle.Spawn(this, _angler.CatTransform, letter, letter.Text);
+            }
+        }
+
+        public void DebugOpenMail() => OpenMail();
+
+        public void DebugCloseLetter() => _letter.Close();
+
+        public void DebugPet() => PetCat();
+
+        [ContextMenu("Force Bite")]
+        void ContextBite() => _biteDue = true;
 
         [ContextMenu("Add 1000 Coins")]
         void ContextCoins()
         {
-            if (_save == null)
-                return;
             _save.coins += 1000;
-            _dirty = true;
-            Persist();
-            RefreshView();
-        }
-
-        [ContextMenu("Reset Save File")]
-        void ContextResetSave()
-        {
-            _save = new SaveData { version = SaveSystem.CurrentVersion };
-            RollNextTarget();
-            ApplySkins();
-            Enter(CatState.Waiting);
-            Persist();
-            RefreshView();
+            MarkDirty(true);
         }
     }
 }

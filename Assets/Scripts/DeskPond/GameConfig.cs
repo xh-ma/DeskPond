@@ -70,9 +70,16 @@ namespace DeskPond
         [Tooltip("Seconds of unbroken idle time that yield one fish. The timer resets on any input.")]
         public float idleSecondsPerFish = 300f;
 
+        [Min(0f)]
+        [Tooltip("Shortest time between two bites, in seconds, however fast the typing. Bites are earned " +
+                 "by counting inputs, so without this a burst of typing lands a fish every few seconds. " +
+                 "Rod upgrades shorten it.")]
+        public float minSecondsBetweenBites = 90f;
+
         [Min(10f)]
-        [Tooltip("Seconds of unbroken idle time before a drifting gift box appears with a free skin.")]
-        public float idleSecondsPerGift = 1800f;
+        [Tooltip("Seconds of play time (the app running) between gift boxes. Input does not reset it, " +
+                 "and progress is saved, so it carries over a restart.")]
+        public float giftEverySeconds = 3600f;
 
         [Min(0f)]
         [Tooltip("Delay before the one-off welcome gift drifts in on a brand new save.")]
