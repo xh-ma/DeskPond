@@ -9,6 +9,16 @@ more you type and click, the faster the fish bite.
 
 ![The cat fishing over a deep pond while a whale swims past](docs/shot_pet.png)
 
+## How fishing works
+
+- Every key press and click counts toward the next bite. The target is about five
+  minutes of work at your own typical pace, so fast and slow typists wait about the
+  same time.
+- Bites are at least 90 seconds apart, however fast you type.
+- When you're idle, the cat still catches a fish about every five minutes.
+- Sometimes a gold `!` appears. Click it quickly for a legendary fish.
+- Long unbroken work stretches make rare fish more likely.
+
 ## Features
 
 - Fish, junk and treasure to collect, with dex sets that unlock special looks
