@@ -40,21 +40,23 @@ namespace DeskPond
         const float MinScale = 1f;
         const float MaxScale = 5f;
         const float DefaultScale = 1.6f;
-        const float HeaderH = 30f;
+        const float HeaderH = 24f;
         const float GripSize = 10f;
-        const int AppRows = 6;
+        const int AppRows = 5;
         const int ChartHours = 24;
         const float ChartH = 46f;
         const float BandH = 6f;
         const int MaxSessionBars = 10;
-        const float RowH = 26f;
-        const float IconSize = 16f;
+        const float RowH = 18f;
+        const float IconSize = 12f;
 
         /// <summary>Rollups walk every stored slice, so they run on a timer, not every frame.</summary>
         const float RefreshSeconds = 2f;
 
-        int _width = 380;
-        float _height = 300f;
+        // Wide and short: the window is a band along the bottom of the screen, so the panel lays
+        // its three sections side by side instead of stacking them.
+        int _width = 640;
+        float _height = 190f;
         float _scale = 2f;
         Vector2 _screenPos;
         bool _placed;
@@ -84,6 +86,8 @@ namespace DeskPond
         Text _lifetimeLine;
         Text _pacing;
         Text _footer;
+        RectTransform _progressFill;
+        float _progressMax;
         PanelButton _titlesButton;
         PanelButton _clearButton;
 
@@ -158,9 +162,10 @@ namespace DeskPond
                 _screenPos = new Vector2(screenPoint.x, screenPoint.y + 24f);
 
             _clearArmed = false;
+            // Refresh first: the height depends on how many apps are listed today.
+            Refresh();
             ClampToScreen();
             ApplyTransform();
-            Refresh();
             PlayOpen();
         }
 
@@ -251,7 +256,8 @@ namespace DeskPond
                     _grabScreen = mouse;
                     _grabScale = _scale;
                 }
-                else if (RectTransformUtility.RectangleContainsScreenPoint(_header, mouse, null))
+                // The close button sits on the header: a press on it is a click, not a drag.
+                else if (RectTransformUtility.RectangleContainsScreenPoint(_header, mouse, null) && !OverButton(mouse))
                 {
                     _moving = true;
                     _grabScreen = mouse;
@@ -292,6 +298,14 @@ namespace DeskPond
             return false;
         }
 
+        bool OverButton(Vector2 mouse)
+        {
+            foreach (var b in _buttons)
+                if (RectTransformUtility.RectangleContainsScreenPoint(b.Rect, mouse, null))
+                    return true;
+            return false;
+        }
+
         static bool _cursorIsResize;
 
         static void SetResizeCursor(bool resize)
@@ -307,12 +321,26 @@ namespace DeskPond
 
         void OnDisable() => SetResizeCursor(false);
 
+        /// <summary>
+        /// The scale actually used: the player's chosen size, shrunk if needed so the whole panel
+        /// fits the window (which is only a box round the pet, not the whole screen).
+        /// </summary>
+        float Eff
+        {
+            get
+            {
+                var fit = Mathf.Min((Screen.height - 8f) / Mathf.Max(1f, _height), (Screen.width - 8f) / Mathf.Max(1f, _width));
+                return Mathf.Max(0.5f, Mathf.Min(_scale, fit));
+            }
+        }
+
         void ApplyTransform()
         {
+            var scale = Eff;
             if (_scaler != null)
-                _scaler.scaleFactor = _scale;
+                _scaler.scaleFactor = scale;
             if (_panel != null)
-                _panel.anchoredPosition = _screenPos / _scale;
+                _panel.anchoredPosition = _screenPos / scale;
         }
 
         /// <summary>Pulls the panel back onto the screen, for when the display shrinks.</summary>
@@ -326,8 +354,8 @@ namespace DeskPond
 
         void ClampToScreen()
         {
-            var halfW = _width * _scale * 0.5f;
-            var h = _height * _scale;
+            var halfW = _width * Eff * 0.5f;
+            var h = _height * Eff;
             var maxX = Mathf.Max(halfW + 4f, Screen.width - halfW - 4f);
             _screenPos.x = Mathf.Clamp(_screenPos.x, halfW + 4f, maxX);
             _screenPos.y = Mathf.Clamp(_screenPos.y, 4f, Mathf.Max(4f, Screen.height - h - 4f));
@@ -392,7 +420,7 @@ namespace DeskPond
                 _summary.text = "Activity logging is off.";
                 _counts.text = "";
                 _rateLine.text = "";
-                _footer.text = "Enable trackActivity in GameConfig.";
+                _footer.text = "enable trackActivity in GameConfig";
                 RefreshProgress();
                 foreach (var row in _appRows)
                 {
@@ -462,7 +490,7 @@ namespace DeskPond
             _summary.text = total <= 0
                 ? "Nothing recorded yet today."
                 : $"{Duration(active.TotalSeconds)} active  ·  {sessions.Count} " +
-                  $"stretch{(sessions.Count == 1 ? "" : "es")}  ·  longest {Duration(longest.TotalSeconds)}";
+                  $"stretch{(sessions.Count == 1 ? "" : "es")}\nlongest {Duration(longest.TotalSeconds)}";
         }
 
         /// <summary>
@@ -520,7 +548,7 @@ namespace DeskPond
                 var label = TitlesRecording && !string.IsNullOrEmpty(entry.Title)
                     ? CleanTitle(entry.Title)
                     : Pretty(entry.App);
-                row.Name.text = Ellipsis(label, 26);
+                row.Name.text = Ellipsis(label, 17);
                 row.Time.text = Duration(entry.Seconds);
                 row.Inputs.text = entry.Inputs > 0 ? Count(entry.Inputs) : "";
 
@@ -543,14 +571,14 @@ namespace DeskPond
 
             var counter = _session != null ? _session.Input : null;
             var rate = counter != null ? counter.Rate : 0f;
-            var scope = counter != null && counter.IsGlobal ? "everywhere" : "this window only";
-            _rateLine.text = $"{rate:0.0} per second right now  ·  counting {scope}";
+            var scope = counter != null && counter.IsGlobal ? "everywhere" : "this window";
+            _rateLine.text = $"{rate:0.0}/s now  ·  {scope}";
 
             RefreshProgress();
 
             var save = _session != null ? _session.Save : null;
             if (save != null)
-                _lifetimeLine.text = Count(save.lifetimeInputs) + " since you started";
+                _lifetimeLine.text = Count(save.lifetimeInputs) + " all time";
         }
 
         void RefreshProgress()
@@ -562,9 +590,10 @@ namespace DeskPond
                 return;
             }
 
-            var pct = Mathf.RoundToInt(_session.CatchProgress * 100f);
-            _progressLine.text = $"{Count(save.inputsTowardCatch)} / {Count(save.nextCatchTarget)} " +
-                                 $"toward the next fish  ({pct}%)";
+            var k = Mathf.Clamp01(_session.CatchProgress);
+            _progressLine.text = $"next fish  {Count(save.inputsTowardCatch)} / {Count(save.nextCatchTarget)}";
+            if (_progressFill != null)
+                _progressFill.sizeDelta = new Vector2(Mathf.Round(_progressMax * k), _progressFill.sizeDelta.y);
         }
 
         /// <summary>Grouped digits, because 12480 and 1248 look alike at a glance.</summary>
@@ -580,10 +609,12 @@ namespace DeskPond
                 return;
             }
 
-            var target = _session.Save != null ? _session.Save.nextCatchTarget : 0;
-            _pacing.text = model.Ready
-                ? $"median {model.MedianRate:0}/min  ·  next fish {target} inputs"
-                : $"learning your pace  ·  {model.Samples}/{RateModel.WarmupSamples} active minutes";
+            var streak = Mathf.FloorToInt(_session.StreakSeconds / 60f);
+            _pacing.text = streak >= 5
+                ? $"streak {streak}m  ·  rare +{_session.StreakTier}"
+                : model.Ready
+                    ? $"pace  {model.MedianRate:0}/min"
+                    : $"learning pace  {model.Samples}/{RateModel.WarmupSamples}";
 
             if (_session.Activity != null && _session.Save != null)
                 _footer.text = $"{_session.Save.lifetimeFish} fish caught  ·  " +
@@ -704,9 +735,15 @@ namespace DeskPond
             _panel.pivot = new Vector2(0.5f, 0f);
             _group = panelGo.AddComponent<CanvasGroup>();
 
-            const float pad = 12f;
-            var content = _width - pad * 2f;
-            var y = 0f;
+            const float pad = 10f;
+            const float gap = 12f;
+            // Three columns side by side: the day by hour, the input counts, the apps.
+            const float colA = 236f;
+            const float colB = 168f;
+            var colC = _width - pad * 2f - colA - colB - gap * 2f;
+            var xA = pad;
+            var xB = xA + colA + gap;
+            var xC = xB + colB + gap;
 
             var header = AddSurface(_panel, "Header", UiKit.HeaderFace, true);
             _header = header.rectTransform;
@@ -717,22 +754,25 @@ namespace DeskPond
             _header.offsetMax = new Vector2(-3f, -3f);
             _header.sizeDelta = new Vector2(-6f, HeaderH);
 
-            MakeLabel(_header, "Title", new Vector2(pad, -7f), 13, TextAnchor.UpperLeft,
+            MakeLabel(_header, "Title", new Vector2(pad, -5f), 12, TextAnchor.UpperLeft,
                 UiKit.TextOnHeader, "Activity", 200f, FontStyle.Bold);
-            MakeLabel(_header, "Day", new Vector2(-pad, -7f), 10, TextAnchor.UpperRight,
+            MakeLabel(_header, "Day", new Vector2(-pad - 24f, -6f), 10, TextAnchor.UpperRight,
                 UiKit.TextOnHeader, DateTime.Now.ToString("ddd d MMM"), 140f, FontStyle.Normal);
+            AddButton("Close", new Rect(_width - pad - 20f, -6f, 20f, 16f), "✕", Close, null, UiKit.ButtonFace);
 
-            y -= HeaderH + 10f;
+            var top = -HeaderH - 9f;
 
-            MakeLabel(_panel, "TodayHeader", new Vector2(pad, y), 10, TextAnchor.UpperLeft,
-                UiKit.TextMuted, "TODAY, BY HOUR", 200f, FontStyle.Bold);
-            y -= 16f;
+            // ---------------------------------------------------------- column A: the day by hour
+            var y = top;
+            MakeLabel(_panel, "TodayHeader", new Vector2(xA, y), 9, TextAnchor.UpperLeft,
+                UiKit.TextMuted, "TODAY, BY HOUR", colA, FontStyle.Bold);
+            y -= 14f;
 
             // Sunken track so the chart reads as a recessed well, matching the shop rows.
             var track = AddSurface(_panel, "ChartTrack", UiKit.FieldFace, false);
-            Place(track.rectTransform, new Rect(pad, y, content, ChartH + 8f));
+            Place(track.rectTransform, new Rect(xA, y, colA, ChartH + 8f));
 
-            var slot = content / ChartHours;
+            var slot = colA / ChartHours;
             for (var i = 0; i < ChartHours; i++)
             {
                 var bar = AddImage(_panel, "Hour" + i, UiKit.White, UiKit.ChartBar);
@@ -742,22 +782,18 @@ namespace DeskPond
                 rt.anchorMax = new Vector2(0f, 1f);
                 // Grows upward from the bottom of the track.
                 rt.pivot = new Vector2(0.5f, 0f);
-                rt.anchoredPosition = new Vector2(pad + slot * (i + 0.5f), y - ChartH - 4f);
+                rt.anchoredPosition = new Vector2(xA + slot * (i + 0.5f), y - ChartH - 4f);
                 rt.sizeDelta = new Vector2(Mathf.Max(2f, slot - 2f), 0f);
                 _hourBars.Add(rt);
                 _hourFills.Add(bar);
             }
+            y -= ChartH + 10f;
 
-            y -= ChartH + 8f;
-
-            // A strip under the chart marking the stretches changepoint detection picked out, so
-            // the segmentation is visible instead of being three numbers in a summary line.
-            _chartOriginX = pad;
-            _chartWidth = content;
-
+            // The stretches changepoint detection picked out, on the same 24 hour scale.
+            _chartOriginX = xA;
+            _chartWidth = colA;
             var bandTrack = AddSurface(_panel, "BandTrack", UiKit.FieldFace, false);
-            Place(bandTrack.rectTransform, new Rect(pad, y, content, BandH + 4f));
-
+            Place(bandTrack.rectTransform, new Rect(xA, y, colA, BandH + 4f));
             for (var i = 0; i < MaxSessionBars; i++)
             {
                 var band = AddImage(_panel, "Band" + i, UiKit.White, UiKit.ChartPeak);
@@ -766,54 +802,62 @@ namespace DeskPond
                 rt.anchorMin = new Vector2(0f, 1f);
                 rt.anchorMax = new Vector2(0f, 1f);
                 rt.pivot = new Vector2(0f, 1f);
-                rt.anchoredPosition = new Vector2(pad, y - 2f);
+                rt.anchoredPosition = new Vector2(xA, y - 2f);
                 rt.sizeDelta = new Vector2(0f, BandH);
                 _sessionBars.Add(rt);
             }
-
-            y -= BandH + 8f;
+            y -= BandH + 6f;
 
             foreach (var mark in new[] { 0, 6, 12, 18 })
-            {
-                MakeLabel(_panel, "Tick" + mark, new Vector2(pad + slot * mark, y), 9,
+                MakeLabel(_panel, "Tick" + mark, new Vector2(xA + slot * mark, y), 8,
                     TextAnchor.UpperLeft, UiKit.TextMuted, mark.ToString("00"), 24f, FontStyle.Normal);
-            }
+            y -= 13f;
+            _summary = MakeLabel(_panel, "Summary", new Vector2(xA, y), 9, TextAnchor.UpperLeft,
+                UiKit.TextDark, "", colA, FontStyle.Normal);
+            var bottomA = y - 24f;
 
+            // ---------------------------------------------------------- column B: input
+            y = top;
+            MakeLabel(_panel, "InputHeader", new Vector2(xB, y), 9, TextAnchor.UpperLeft,
+                UiKit.TextMuted, "INPUT", colB, FontStyle.Bold);
             y -= 14f;
-            _summary = MakeLabel(_panel, "Summary", new Vector2(pad, y), 10, TextAnchor.UpperLeft,
-                UiKit.TextDark, "", content, FontStyle.Normal);
-            y -= 20f;
-
-            MakeLabel(_panel, "InputHeader", new Vector2(pad, y), 10, TextAnchor.UpperLeft,
-                UiKit.TextMuted, "INPUT", 240f, FontStyle.Bold);
-            y -= 16f;
+            const float wellH = 88f;
+            var well = AddSurface(_panel, "CountWell", UiKit.FieldFace, false);
+            Place(well.rectTransform, new Rect(xB, y, colB, wellH));
 
             // The day's count is the headline, so it gets the largest type on the panel.
-            var well = AddSurface(_panel, "CountWell", UiKit.FieldFace, false);
-            Place(well.rectTransform, new Rect(pad, y, content, 54f));
+            _counts = MakeLabel(_panel, "Counts", new Vector2(xB + 7f, y - 5f), 14,
+                TextAnchor.UpperLeft, UiKit.TextDark, "", colB - 14f, FontStyle.Bold);
+            _rateLine = MakeLabel(_panel, "Rate", new Vector2(xB + 7f, y - 24f), 8,
+                TextAnchor.UpperLeft, UiKit.TextMuted, "", colB - 14f, FontStyle.Normal);
+            _lifetimeLine = MakeLabel(_panel, "Lifetime", new Vector2(xB + 7f, y - 35f), 8,
+                TextAnchor.UpperLeft, UiKit.TextMuted, "", colB - 14f, FontStyle.Normal);
+            _progressLine = MakeLabel(_panel, "Progress", new Vector2(xB + 7f, y - 50f), 8,
+                TextAnchor.UpperLeft, UiKit.TextDark, "", colB - 14f, FontStyle.Normal);
 
-            _counts = MakeLabel(_panel, "Counts", new Vector2(pad + 8f, y - 5f), 14,
-                TextAnchor.UpperLeft, UiKit.TextDark, "", content - 16f, FontStyle.Bold);
-            _rateLine = MakeLabel(_panel, "Rate", new Vector2(pad + 8f, y - 24f), 9,
-                TextAnchor.UpperLeft, UiKit.TextMuted, "", content - 16f, FontStyle.Normal);
-            _progressLine = MakeLabel(_panel, "Progress", new Vector2(pad + 8f, y - 37f), 9,
-                TextAnchor.UpperLeft, UiKit.TextMuted, "", content - 16f, FontStyle.Normal);
-            y -= 62f;
+            // Progress toward the next fish as a bar, readable without doing the division.
+            var progTrack = AddSurface(_panel, "ProgressTrack", UiKit.PanelFace, false);
+            Place(progTrack.rectTransform, new Rect(xB + 7f, y - 63f, colB - 14f, 8f));
+            var progFill = AddImage(_panel, "ProgressFill", UiKit.White, UiKit.ChartPeak);
+            progFill.type = Image.Type.Simple;
+            _progressFill = progFill.rectTransform;
+            Place(_progressFill, new Rect(xB + 9f, y - 65f, 0f, 4f));
+            _progressMax = colB - 18f;
 
-            _lifetimeLine = MakeLabel(_panel, "Lifetime", new Vector2(pad, y), 9,
-                TextAnchor.UpperLeft, UiKit.TextMuted, "", content, FontStyle.Normal);
-            y -= 20f;
+            _pacing = MakeLabel(_panel, "Pacing", new Vector2(xB + 7f, y - 75f), 8,
+                TextAnchor.UpperLeft, UiKit.TextMuted, "", colB - 14f, FontStyle.Normal);
+            var bottomB = y - wellH - 8f;
 
-            MakeLabel(_panel, "AppsHeader", new Vector2(pad, y), 10, TextAnchor.UpperLeft,
-                UiKit.TextMuted, "WHERE THE TIME WENT", 200f, FontStyle.Bold);
-            MakeLabel(_panel, "AppsLegend", new Vector2(-pad, y), 9, TextAnchor.UpperRight,
-                UiKit.TextMuted, "inputs      time", 140f, FontStyle.Normal);
-            y -= 16f;
-
+            // ---------------------------------------------------------- column C: apps
+            y = top;
+            MakeLabel(_panel, "AppsHeader", new Vector2(xC, y), 9, TextAnchor.UpperLeft,
+                UiKit.TextMuted, "WHERE THE TIME WENT", colC, FontStyle.Bold);
+            y -= 14f;
+            var right = _width - (xC + colC);
             for (var i = 0; i < AppRows; i++)
             {
                 var rowBg = AddSurface(_panel, "AppRow" + i, UiKit.FieldFace, false);
-                Place(rowBg.rectTransform, new Rect(pad, y, content, RowH));
+                Place(rowBg.rectTransform, new Rect(xC, y, colC, RowH));
 
                 // The bar sits inside the row behind everything else, so it reads as a fill level.
                 var bar = AddImage(_panel, "AppBar" + i, UiKit.White, UiKit.ChartBar);
@@ -822,7 +866,7 @@ namespace DeskPond
                 barRt.anchorMin = new Vector2(0f, 1f);
                 barRt.anchorMax = new Vector2(0f, 1f);
                 barRt.pivot = new Vector2(0f, 1f);
-                barRt.anchoredPosition = new Vector2(pad + 2f, y - 2f);
+                barRt.anchoredPosition = new Vector2(xC + 2f, y - 2f);
                 barRt.sizeDelta = new Vector2(0f, RowH - 4f);
                 bar.color = new Color(UiKit.ChartBar.r, UiKit.ChartBar.g, UiKit.ChartBar.b, 0.5f);
 
@@ -833,43 +877,36 @@ namespace DeskPond
                 iconRt.anchorMin = new Vector2(0f, 1f);
                 iconRt.anchorMax = new Vector2(0f, 1f);
                 iconRt.pivot = new Vector2(0f, 1f);
-                iconRt.anchoredPosition = new Vector2(pad + 6f, y - 5f);
+                iconRt.anchoredPosition = new Vector2(xC + 4f, y - 3f);
                 iconRt.sizeDelta = new Vector2(IconSize, IconSize);
 
                 _appRows.Add(new AppRow
                 {
-                    Name = MakeLabel(_panel, "AppName" + i, new Vector2(pad + 28f, y - 7f), 10,
-                        TextAnchor.UpperLeft, UiKit.TextDark, "", content - 150f, FontStyle.Normal),
-                    Inputs = MakeLabel(_panel, "AppInputs" + i, new Vector2(-pad - 62f, y - 7f), 9,
-                        TextAnchor.UpperRight, UiKit.TextMuted, "", 78f, FontStyle.Normal),
-                    Time = MakeLabel(_panel, "AppTime" + i, new Vector2(-pad - 8f, y - 7f), 10,
-                        TextAnchor.UpperRight, UiKit.TextDark, "", 56f, FontStyle.Normal),
+                    Name = MakeLabel(_panel, "AppName" + i, new Vector2(xC + 20f, y - 4f), 9,
+                        TextAnchor.UpperLeft, UiKit.TextDark, "", colC - 66f, FontStyle.Normal),
+                    // Per-app input counts no longer fit beside the name; the time is what matters.
+                    Inputs = MakeLabel(_panel, "AppInputs" + i, new Vector2(-right - 4f, y - 4f), 8,
+                        TextAnchor.UpperRight, UiKit.TextMuted, "", 0f, FontStyle.Normal),
+                    Time = MakeLabel(_panel, "AppTime" + i, new Vector2(-right - 5f, y - 4f), 9,
+                        TextAnchor.UpperRight, UiKit.TextDark, "", 44f, FontStyle.Normal),
                     Icon = icon,
                     Bar = barRt,
-                    BarMax = content - 4f
+                    BarMax = colC - 4f
                 });
-
-                y -= RowH + 3f;
+                _appRows[i].Inputs.enabled = false;
+                y -= RowH + 2f;
             }
+            var bottomC = y - 4f;
 
-            y -= 6f;
-            MakeLabel(_panel, "PacingHeader", new Vector2(pad, y), 10, TextAnchor.UpperLeft,
-                UiKit.TextMuted, "PACING", 200f, FontStyle.Bold);
-            y -= 16f;
-            _pacing = MakeLabel(_panel, "Pacing", new Vector2(pad, y), 10, TextAnchor.UpperLeft,
-                UiKit.TextDark, "", content, FontStyle.Normal);
-            y -= 18f;
-            _footer = MakeLabel(_panel, "Footer", new Vector2(pad, y), 9, TextAnchor.UpperLeft,
-                UiKit.TextMuted, "", content, FontStyle.Normal);
-            y -= 22f;
-
-            _titlesButton = AddButton("Titles", new Rect(pad, y, 74f, 18f), "sites: off",
+            // ---------------------------------------------------------- footer row
+            y = Mathf.Min(bottomA, Mathf.Min(bottomB, bottomC));
+            _titlesButton = AddButton("Titles", new Rect(pad, y, 70f, 16f), "sites: off",
                 ToggleTitles, null, UiKit.ButtonFace);
-            _clearButton = AddButton("Clear", new Rect(pad + 80f, y, 52f, 18f), "clear",
+            _clearButton = AddButton("Clear", new Rect(pad + 76f, y, 48f, 16f), "clear",
                 ClearPressed, () => _session != null && _session.Activity != null, UiKit.QuitFace);
-            AddButton("Close", new Rect(_width - pad - 24f, y, 24f, 18f), "✕",
-                Close, null, UiKit.ButtonFace);
-            y -= 24f;
+            _footer = MakeLabel(_panel, "Footer", new Vector2(pad + 134f, y - 4f), 8, TextAnchor.UpperLeft,
+                UiKit.TextMuted, "", _width - pad * 2f - 160f, FontStyle.Normal);
+            y -= 22f;
 
             _height = -y + 8f;
             _panel.sizeDelta = new Vector2(_width, _height);

@@ -17,25 +17,30 @@ namespace DeskPond
     /// </summary>
     public static class UiKit
     {
-        public static readonly Color PanelFace = Hex(0xD4D0C4);
-        public static readonly Color HeaderFace = Hex(0xA8A49A);
-        public static readonly Color FieldFace = Hex(0xC4C0B2);
-        public static readonly Color Outline = Hex(0x2A2A28);
+        // Pastel retro-window palette: lavender faces, navy ink, pink accents.
+        public static readonly Color PanelFace = Hex(0xD9DEF2);
+        public static readonly Color HeaderFace = Hex(0xF2A0B6);
+        public static readonly Color FieldFace = Hex(0xC4CBE8);
+        public static readonly Color Outline = Hex(0x27306B);
         public static readonly Color BevelLight = Hex(0xFFFFFF);
-        public static readonly Color BevelDark = Hex(0x6E6A62);
+        public static readonly Color BevelDark = Hex(0x9AA3CC);
 
-        public static readonly Color ButtonFace = Hex(0xD4D0C4);
-        public static readonly Color SellFace = Hex(0x93B383);
-        public static readonly Color QuitFace = Hex(0xC79191);
+        public static readonly Color ButtonFace = Hex(0xE6EAF8);
+        public static readonly Color SellFace = Hex(0xA8DCB0);
+        public static readonly Color QuitFace = Hex(0xF2A0B6);
+        public static readonly Color TabFace = Hex(0x3A4590);
+        public static readonly Color TabActive = Hex(0xF2A0B6);
+        public static readonly Color GoldFace = Hex(0xF6D65A);
 
-        public static readonly Color ChartBar = Hex(0x7A9CC6);
-        public static readonly Color ChartPeak = Hex(0x40699E);
-        public static readonly Color ChartTrack = Hex(0xBDB9AC);
+        public static readonly Color ChartBar = Hex(0x7A9CD6);
+        public static readonly Color ChartPeak = Hex(0xE0708E);
+        public static readonly Color ChartTrack = Hex(0xBCC3E2);
 
-        public static readonly Color TextDark = Hex(0x1A1A18);
-        public static readonly Color TextMuted = Hex(0x55524A);
-        public static readonly Color TextOnHeader = Hex(0x14140F);
-        public static readonly Color Accent = Hex(0x6B4A10);
+        public static readonly Color TextDark = Hex(0x27306B);
+        public static readonly Color TextMuted = Hex(0x6A72A8);
+        public static readonly Color TextOnHeader = Hex(0xFFFFFF);
+        public static readonly Color TextLight = Hex(0xFFFFFF);
+        public static readonly Color Accent = Hex(0xC0507A);
 
         static Color Hex(int rgb) => new Color(
             ((rgb >> 16) & 0xFF) / 255f, ((rgb >> 8) & 0xFF) / 255f, (rgb & 0xFF) / 255f, 1f);

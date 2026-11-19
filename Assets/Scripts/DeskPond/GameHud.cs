@@ -3,114 +3,132 @@ using UnityEngine.UI;
 
 namespace DeskPond
 {
+    /// <summary>
+    /// World-anchored labels over the pet: the speech bubble that announces catches, and the
+    /// small "count/capacity" tag on the bucket. Nothing is pinned to a screen corner, since the
+    /// window is only a band along the bottom of the screen.
+    /// </summary>
     public class GameHud : MonoBehaviour
     {
-        Text _coins;
-        Text _rate;
-        Image _progressFill;
-        RectTransform _progressTrack;
-
-        // Labels that track the pet in world space rather than sitting in a screen corner.
-        Text _basketTag;
-        Text _catTag;
-
-        // Reward bubble.
         RectTransform _bubble;
         CanvasGroup _bubbleGroup;
         Text _bubbleText;
         Transform _bubbleFollow;
         float _bubbleSeconds;
         float _bubbleElapsed;
+        Text _bucketTag;
+        float _bucketFlash;
+        float _giftFlash;
+        RectTransform _giftTag;
+        Text _giftText;
+        Text _streakTag;
 
         GameSession _session;
         Transform _cat;
-        Transform _basket;
+        Transform _bucket;
         Camera _camera;
-        float _tagScale = 1f;
+        CanvasScaler _scaler;
+        float _scale = 1f;
+
+        public bool BubbleVisible => _bubble != null && _bubble.gameObject.activeSelf;
 
         public static GameHud Create()
         {
             var root = new GameObject("HUD");
             var canvas = root.AddComponent<Canvas>();
             canvas.renderMode = RenderMode.ScreenSpaceOverlay;
-            canvas.sortingOrder = 10;
-
-            var scaler = root.AddComponent<CanvasScaler>();
-            scaler.uiScaleMode = CanvasScaler.ScaleMode.ConstantPixelSize;
-            scaler.scaleFactor = 1f;
-
+            // Above the panels, so a sale message from the shop shows over the cat even while the
+            // panel is open.
+            canvas.sortingOrder = 60;
             var hud = root.AddComponent<GameHud>();
+            hud._scaler = root.AddComponent<CanvasScaler>();
+            hud._scaler.uiScaleMode = CanvasScaler.ScaleMode.ConstantPixelSize;
             hud.Build();
             return hud;
         }
 
-        public void Bind(GameSession session, Transform cat, Transform basket, Camera cam, float zoom)
+        public void Bind(GameSession session, Transform cat, Transform bucket, Camera cam, float zoom)
         {
             _session = session;
             _cat = cat;
-            _basket = basket;
+            _bucket = bucket;
             _camera = cam;
-            _tagScale = Mathf.Max(0.5f, zoom / 3f);
-
-            if (_basketTag != null)
-                _basketTag.fontSize = Mathf.RoundToInt(13f * _tagScale);
-            if (_catTag != null)
-                _catTag.fontSize = Mathf.RoundToInt(13f * _tagScale);
-        }
-
-        public void Refresh(GameSession session)
-        {
-            if (session == null)
-                return;
-
-            if (_coins != null)
-                _coins.text = session.Coins.ToString();
-
-            if (_progressFill != null && _progressTrack != null)
-            {
-                var width = _progressTrack.sizeDelta.x * Mathf.Clamp01(session.CatchProgress);
-                _progressFill.rectTransform.sizeDelta = new Vector2(width, _progressTrack.sizeDelta.y);
-                _progressFill.color = session.BasketFull
-                    ? new Color(0.8f, 0.35f, 0.3f)
-                    : new Color(0.4f, 0.78f, 0.95f);
-            }
+            // One UI design unit is one art pixel, so the pixel font lines up with the art.
+            _scale = Mathf.Max(1f, zoom);
+            if (_scaler != null)
+                _scaler.scaleFactor = _scale;
         }
 
         void Update()
         {
-            if (_session == null)
-                _session = FindFirstObjectByType<GameSession>();
-            if (_session == null)
-                return;
-
-            if (_rate != null && _session.Input != null)
-            {
-                _rate.text = _session.Input.Rate > 0.15f
-                    ? "activity " + _session.Input.Rate.ToString("0.0") + "/s"
-                    : "idle";
-            }
-
-            Refresh(_session);
-            PlaceTags();
             TickBubble();
+            PlaceTag();
+            PlaceGiftTag();
+            PlaceStreakTag();
         }
 
         /// <summary>
-        /// Pops a speech bubble above the pet announcing a reward, then fades it out. Follows the
-        /// anchor each frame so it stays put if the player drags the cat while it is showing.
+        /// The work stretch going on now, shown over the cat while the cursor rests on it and
+        /// only once the stretch is long enough to be raising the odds.
         /// </summary>
-        public void ShowBubble(string message, Transform follow, float seconds = 3.5f)
+        void PlaceStreakTag()
+        {
+            if (_streakTag == null || _session == null || _cat == null || _camera == null)
+                return;
+            var tier = _session.StreakTier;
+            var show = tier > 0 && _giftFlash > -0.05f && !BubbleVisible;
+            _streakTag.enabled = show;
+            if (!show)
+                return;
+            _streakTag.text = "STREAK " + Mathf.FloorToInt(_session.StreakSeconds / 60f) + "M  RARE +" + tier;
+            var screen = _camera.WorldToScreenPoint(_cat.position) / _scale;
+            _streakTag.rectTransform.anchoredPosition = new Vector2(Mathf.Round(screen.x), Mathf.Round(screen.y + 46f));
+        }
+
+        /// <summary>Shows the gift countdown over the cat (while the cursor is on it).</summary>
+        public void FlashGiftTimer(float seconds) => _giftFlash = Mathf.Max(_giftFlash, seconds);
+
+        /// <summary>Shows the bucket's count for a few seconds (after a catch, or on hover).</summary>
+        public void FlashBucketCount(float seconds) => _bucketFlash = Mathf.Max(_bucketFlash, seconds);
+
+        /// <summary>
+        /// A small gift icon and countdown over the cat: play time left until the next gift box.
+        /// Shown while the cursor rests on the cat and through the final minute, so it is there
+        /// when wanted without sitting on screen all hour. The panel's top strip always has it.
+        /// </summary>
+        void PlaceGiftTag()
+        {
+            if (_giftTag == null || _session == null || _cat == null || _camera == null)
+                return;
+            var left = _session.GiftSecondsLeft;
+            _giftFlash -= Time.deltaTime;
+            var show = left > 0f && (_giftFlash > 0f || left <= 60f) && !BubbleVisible;
+            if (_giftTag.gameObject.activeSelf != show)
+                _giftTag.gameObject.SetActive(show);
+            if (!show)
+                return;
+            var total = Mathf.CeilToInt(left);
+            var text = (total / 60).ToString("00") + ":" + (total % 60).ToString("00");
+            if (_giftText.text != text)
+            {
+                _giftText.text = text;
+                // The pill grows with the text so the digits never spill out of it.
+                _giftTag.sizeDelta = new Vector2(Mathf.Ceil(_giftText.preferredWidth) + 20f, 14f);
+            }
+            var screen = _camera.WorldToScreenPoint(_cat.position) / _scale;
+            _giftTag.anchoredPosition = new Vector2(Mathf.Round(screen.x), Mathf.Round(screen.y + 30f));
+        }
+
+        public void ShowBubble(string message, Transform follow, float seconds = 3f)
         {
             if (_bubble == null)
                 return;
-
             _bubbleFollow = follow != null ? follow : _cat;
             _bubbleText.text = message;
-
-            // Size the bubble to its text rather than guessing a fixed width.
-            var width = Mathf.Clamp(_bubbleText.preferredWidth + 24f, 80f, 320f);
-            _bubble.sizeDelta = new Vector2(width, 30f);
-
+            var width = Mathf.Clamp(_bubbleText.preferredWidth + 10f, 24f, 150f);
+            _bubbleText.horizontalOverflow = width >= 150f ? HorizontalWrapMode.Wrap : HorizontalWrapMode.Overflow;
+            var height = width >= 150f ? _bubbleText.preferredHeight + 7f : 14f;
+            _bubble.sizeDelta = new Vector2(width, Mathf.Max(14f, height));
             _bubbleSeconds = seconds;
             _bubbleElapsed = 0f;
             _bubble.gameObject.SetActive(true);
@@ -118,9 +136,8 @@ namespace DeskPond
 
         void TickBubble()
         {
-            if (_bubble == null || !_bubble.gameObject.activeSelf)
+            if (!BubbleVisible)
                 return;
-
             _bubbleElapsed += Time.deltaTime;
             if (_bubbleElapsed >= _bubbleSeconds)
             {
@@ -130,196 +147,142 @@ namespace DeskPond
 
             if (_bubbleFollow != null && _camera != null)
             {
-                var screen = _camera.WorldToScreenPoint(_bubbleFollow.position);
-                // Rises slightly as it plays, which reads as a pop rather than a static label.
-                var lift = Mathf.Lerp(0f, 14f, Mathf.Clamp01(_bubbleElapsed / 0.5f));
-                _bubble.anchoredPosition = new Vector2(screen.x, screen.y + (62f * _tagScale) + lift);
+                var screen = _camera.WorldToScreenPoint(_bubbleFollow.position) / _scale;
+                var lift = Mathf.Lerp(0f, 3f, Mathf.Clamp01(_bubbleElapsed / 0.4f));
+                var half = _bubble.sizeDelta.x * 0.5f;
+                var maxX = Screen.width / _scale - half - 2f;
+                // The cat's transform is at its feet: clear the whole cat (24 px) and a hat, so the
+                // bubble sits above the head instead of over the face.
+                var above = _bubbleFollow == _cat ? 30f : 10f;
+                _bubble.anchoredPosition = new Vector2(Mathf.Clamp(screen.x, half + 2f, Mathf.Max(half + 2f, maxX)),
+                    screen.y + above + lift);
             }
 
-            // Fade over the last half second.
             var remaining = _bubbleSeconds - _bubbleElapsed;
-            var alpha = Mathf.Clamp01(remaining / 0.5f) * Mathf.Clamp01(_bubbleElapsed / 0.15f);
-            _bubbleGroup.alpha = alpha;
+            _bubbleGroup.alpha = Mathf.Clamp01(remaining / 0.4f) * Mathf.Clamp01(_bubbleElapsed / 0.12f);
         }
 
-        void PlaceTags()
+        void PlaceTag()
         {
-            if (_camera == null)
-                _camera = Camera.main;
-            if (_camera == null)
+            if (_bucketTag == null || _bucket == null || _camera == null || _session == null || _session.Save == null)
                 return;
-
-            if (_basketTag != null && _basket != null)
-            {
-                _basketTag.text = _session.BasketFish + "/" + _session.Capacity;
-                _basketTag.color = _session.BasketFull
-                    ? new Color(1f, 0.55f, 0.45f)
-                    : new Color(0.94f, 0.96f, 1f);
-                Place(_basketTag.rectTransform, _basket.position, 34f);
-            }
-
-            if (_catTag != null && _cat != null)
-            {
-                var idle = _session.IsIdle;
-                _catTag.enabled = idle;
-                if (idle)
-                {
-                    _catTag.text = "idle  " + Clock(_session.IdleSeconds);
-                    Place(_catTag.rectTransform, _cat.position, 40f);
-                }
-            }
-        }
-
-        void Place(RectTransform rt, Vector3 world, float pixelOffset)
-        {
-            var screen = _camera.WorldToScreenPoint(world);
-            rt.anchoredPosition = new Vector2(screen.x, screen.y + pixelOffset * _tagScale);
-        }
-
-        static string Clock(float seconds)
-        {
-            var total = Mathf.Max(0, Mathf.FloorToInt(seconds));
-            return (total / 60).ToString("00") + ":" + (total % 60).ToString("00");
+            var count = _session.BasketFish;
+            _bucketFlash -= Time.deltaTime;
+            _bucketTag.enabled = count > 0 && _bucketFlash > 0f;
+            if (!_bucketTag.enabled)
+                return;
+            _bucketTag.text = count + "/" + _session.Capacity;
+            _bucketTag.color = _session.BasketFull ? new Color(1f, 0.6f, 0.55f) : new Color(0.96f, 0.97f, 1f);
+            var screen = _camera.WorldToScreenPoint(_bucket.position) / _scale;
+            _bucketTag.rectTransform.anchoredPosition = new Vector2(screen.x + 4f, screen.y + 14f);
         }
 
         void Build()
         {
             var font = UiKit.PixelFont;
 
-            var coinGo = new GameObject("CoinIcon");
-            coinGo.transform.SetParent(transform, false);
-            var coinIcon = coinGo.AddComponent<Image>();
-            coinIcon.sprite = UiKit.Coin;
-            coinIcon.raycastTarget = false;
-            var coinRt = coinIcon.rectTransform;
-            coinRt.anchorMin = new Vector2(0f, 1f);
-            coinRt.anchorMax = new Vector2(0f, 1f);
-            coinRt.pivot = new Vector2(0f, 1f);
-            coinRt.anchoredPosition = new Vector2(8f, -8f);
-            coinRt.sizeDelta = new Vector2(16f, 16f);
-
-            _coins = MakeLabel("Coins", new Vector2(28f, -6f), 16, TextAnchor.UpperLeft,
-                new Color(1f, 0.85f, 0.35f), font);
-            _rate = MakeLabel("Rate", new Vector2(-8f, -6f), 12, TextAnchor.UpperRight,
-                new Color(0.55f, 0.75f, 0.9f), font);
-            _rate.rectTransform.sizeDelta = new Vector2(200f, 22f);
-
-            var trackGo = new GameObject("ProgressTrack");
-            trackGo.transform.SetParent(transform, false);
-            var trackImage = trackGo.AddComponent<Image>();
-            trackImage.color = new Color(1f, 1f, 1f, 0.13f);
-            _progressTrack = trackImage.rectTransform;
-            _progressTrack.anchorMin = new Vector2(0f, 1f);
-            _progressTrack.anchorMax = new Vector2(0f, 1f);
-            _progressTrack.pivot = new Vector2(0f, 1f);
-            _progressTrack.anchoredPosition = new Vector2(8f, -30f);
-            _progressTrack.sizeDelta = new Vector2(140f, 5f);
-
-            var fillGo = new GameObject("ProgressFill");
-            fillGo.transform.SetParent(_progressTrack, false);
-            _progressFill = fillGo.AddComponent<Image>();
-            _progressFill.color = new Color(0.4f, 0.78f, 0.95f);
-            var fillRt = _progressFill.rectTransform;
-            fillRt.anchorMin = Vector2.zero;
-            fillRt.anchorMax = new Vector2(0f, 1f);
-            fillRt.pivot = new Vector2(0f, 0.5f);
-            fillRt.anchoredPosition = Vector2.zero;
-            fillRt.sizeDelta = new Vector2(0f, 5f);
-
-            _basketTag = MakeTag("BasketTag", font, new Color(0.94f, 0.96f, 1f));
-            _catTag = MakeTag("CatTag", font, new Color(0.72f, 0.86f, 1f));
-            _catTag.enabled = false;
-
-            BuildBubble(font);
-        }
-
-        void BuildBubble(Font font)
-        {
-            var go = new GameObject("RewardBubble");
+            var go = new GameObject("Bubble");
             go.transform.SetParent(transform, false);
             var image = go.AddComponent<Image>();
             image.sprite = UiKit.Raised(UiKit.PanelFace);
             image.type = Image.Type.Sliced;
-            image.color = Color.white;
             image.raycastTarget = false;
-
             _bubble = image.rectTransform;
             _bubble.anchorMin = Vector2.zero;
             _bubble.anchorMax = Vector2.zero;
             _bubble.pivot = new Vector2(0.5f, 0f);
-            _bubble.sizeDelta = new Vector2(160f, 30f);
-
             _bubbleGroup = go.AddComponent<CanvasGroup>();
 
             var textGo = new GameObject("Text");
             textGo.transform.SetParent(_bubble, false);
             _bubbleText = textGo.AddComponent<Text>();
             _bubbleText.font = font;
-            _bubbleText.fontSize = 13;
-            _bubbleText.fontStyle = FontStyle.Bold;
+            _bubbleText.fontSize = 8;
             _bubbleText.alignment = TextAnchor.MiddleCenter;
             _bubbleText.color = UiKit.TextDark;
             _bubbleText.horizontalOverflow = HorizontalWrapMode.Overflow;
             _bubbleText.verticalOverflow = VerticalWrapMode.Overflow;
             _bubbleText.raycastTarget = false;
-
             var rt = _bubbleText.rectTransform;
             rt.anchorMin = Vector2.zero;
             rt.anchorMax = Vector2.one;
-            rt.offsetMin = Vector2.zero;
-            rt.offsetMax = Vector2.zero;
-
+            rt.offsetMin = new Vector2(4f, 2f);
+            rt.offsetMax = new Vector2(-4f, -2f);
             go.SetActive(false);
+
+            var tagGo = new GameObject("BucketTag");
+            tagGo.transform.SetParent(transform, false);
+            _bucketTag = tagGo.AddComponent<Text>();
+            _bucketTag.font = font;
+            _bucketTag.fontSize = 8;
+            _bucketTag.alignment = TextAnchor.LowerCenter;
+            _bucketTag.horizontalOverflow = HorizontalWrapMode.Overflow;
+            _bucketTag.verticalOverflow = VerticalWrapMode.Overflow;
+            _bucketTag.raycastTarget = false;
+            var outline = tagGo.AddComponent<Outline>();
+            outline.effectColor = new Color(0.15f, 0.19f, 0.42f, 1f);
+            outline.effectDistance = new Vector2(1f, -1f);
+            var trt = _bucketTag.rectTransform;
+            trt.anchorMin = Vector2.zero;
+            trt.anchorMax = Vector2.zero;
+            trt.pivot = new Vector2(0.5f, 0f);
+            trt.sizeDelta = new Vector2(40f, 10f);
+
+            var streakGo = new GameObject("StreakTag");
+            streakGo.transform.SetParent(transform, false);
+            _streakTag = streakGo.AddComponent<Text>();
+            _streakTag.font = font;
+            _streakTag.fontSize = 8;
+            _streakTag.alignment = TextAnchor.LowerCenter;
+            _streakTag.color = new Color(1f, 0.92f, 0.55f);
+            _streakTag.horizontalOverflow = HorizontalWrapMode.Overflow;
+            _streakTag.verticalOverflow = VerticalWrapMode.Overflow;
+            _streakTag.raycastTarget = false;
+            var streakOutline = streakGo.AddComponent<Outline>();
+            streakOutline.effectColor = new Color(0.15f, 0.19f, 0.42f, 1f);
+            streakOutline.effectDistance = new Vector2(1f, -1f);
+            var srt = _streakTag.rectTransform;
+            srt.anchorMin = srt.anchorMax = Vector2.zero;
+            srt.pivot = new Vector2(0.5f, 0f);
+            srt.sizeDelta = new Vector2(120f, 10f);
+            _streakTag.enabled = false;
+
+            // Gift countdown: icon + mm:ss in a small sunken pill.
+            var gift = new GameObject("GiftTag");
+            gift.transform.SetParent(transform, false);
+            var pill = gift.AddComponent<Image>();
+            pill.sprite = UiKit.Raised(UiKit.PanelFace);
+            pill.type = Image.Type.Sliced;
+            pill.raycastTarget = false;
+            _giftTag = pill.rectTransform;
+            _giftTag.anchorMin = _giftTag.anchorMax = Vector2.zero;
+            _giftTag.pivot = new Vector2(0.5f, 0f);
+            _giftTag.sizeDelta = new Vector2(40f, 14f);
+            var iconGo = new GameObject("Icon");
+            iconGo.transform.SetParent(_giftTag, false);
+            var icon = iconGo.AddComponent<Image>();
+            icon.sprite = Atlas.Ui("icon_gift");
+            icon.raycastTarget = false;
+            var irt = icon.rectTransform;
+            irt.anchorMin = irt.anchorMax = new Vector2(0f, 0.5f);
+            irt.pivot = new Vector2(0f, 0.5f);
+            irt.anchoredPosition = new Vector2(2f, 0f);
+            irt.sizeDelta = new Vector2(12f, 12f);
+            var tg = new GameObject("Time");
+            tg.transform.SetParent(_giftTag, false);
+            _giftText = tg.AddComponent<Text>();
+            _giftText.font = font;
+            _giftText.fontSize = 8;
+            _giftText.color = UiKit.TextDark;
+            _giftText.alignment = TextAnchor.MiddleLeft;
+            _giftText.horizontalOverflow = HorizontalWrapMode.Overflow;
+            _giftText.raycastTarget = false;
+            var ttr = _giftText.rectTransform;
+            ttr.anchorMin = Vector2.zero;
+            ttr.anchorMax = Vector2.one;
+            ttr.offsetMin = new Vector2(16f, 0f);
+            ttr.offsetMax = new Vector2(-3f, 0f);
+            gift.SetActive(false);
         }
-
-        /// <summary>A world-tracking label, outlined so it stays readable over any desktop content.</summary>
-        Text MakeTag(string name, Font font, Color color)
-        {
-            var go = new GameObject(name);
-            go.transform.SetParent(transform, false);
-            var text = go.AddComponent<Text>();
-            text.font = font;
-            text.fontSize = 13;
-            text.fontStyle = FontStyle.Bold;
-            text.alignment = TextAnchor.LowerCenter;
-            text.color = color;
-            text.horizontalOverflow = HorizontalWrapMode.Overflow;
-            text.verticalOverflow = VerticalWrapMode.Overflow;
-            text.raycastTarget = false;
-
-            var outline = go.AddComponent<Outline>();
-            outline.effectColor = new Color(0f, 0f, 0f, 0.85f);
-            outline.effectDistance = new Vector2(1.4f, -1.4f);
-
-            var rt = text.rectTransform;
-            rt.anchorMin = Vector2.zero;
-            rt.anchorMax = Vector2.zero;
-            rt.pivot = new Vector2(0.5f, 0f);
-            rt.sizeDelta = new Vector2(160f, 22f);
-            return text;
-        }
-
-        Text MakeLabel(string name, Vector2 anchoredPos, int size, TextAnchor anchor, Color color, Font font)
-        {
-            var go = new GameObject(name);
-            go.transform.SetParent(transform, false);
-            var text = go.AddComponent<Text>();
-            text.font = font;
-            text.fontSize = size;
-            text.alignment = anchor;
-            text.color = color;
-            text.horizontalOverflow = HorizontalWrapMode.Overflow;
-            text.verticalOverflow = VerticalWrapMode.Overflow;
-            text.raycastTarget = false;
-
-            var rt = text.rectTransform;
-            rt.anchorMin = new Vector2(anchor == TextAnchor.UpperRight ? 1f : 0f, 1f);
-            rt.anchorMax = rt.anchorMin;
-            rt.pivot = new Vector2(anchor == TextAnchor.UpperRight ? 1f : 0f, 1f);
-            rt.anchoredPosition = anchoredPos;
-            rt.sizeDelta = new Vector2(140f, 22f);
-            return text;
-        }
-
-            }
+    }
 }
