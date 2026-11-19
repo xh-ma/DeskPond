@@ -10,45 +10,23 @@ namespace DeskPond
     }
 
     /// <summary>
-    /// Static balance table for the shop. Levels are 0-based; level N costs Costs[N] to reach N+1.
+    /// Balance table for the gull's upgrades. Levels are 0-based; level N costs Costs[N] to reach
+    /// N+1. Cosmetics live in <see cref="Looks"/>, catches in <see cref="Catalog"/>.
     /// </summary>
     public static class ShopDefs
     {
-        public const int BaseFishPrice = 5;
-        public const int BaseCapacity = 20;
+        public const int BaseCapacity = 8;
 
-        // Inputs needed per fish before any rod upgrade.
+        /// <summary>Live fish the tank in the panel can hold.</summary>
+        public const int TankCapacity = 6;
+
+        // Inputs needed per fish before any rod upgrade, while pacing is still warming up.
         public const int BaseMinInputs = 10;
         public const int BaseMaxInputs = 1000;
 
         public static readonly int[] RodCosts = { 60, 180, 450, 1100, 2600 };
         public static readonly int[] BasketCosts = { 40, 120, 320, 800, 1900 };
         public static readonly int[] LureCosts = { 80, 240, 600, 1500, 3400 };
-
-        /// <summary>
-        /// Index 0 must always be the untouched original; see PaletteSwap for how these apply.
-        /// </summary>
-        public static readonly SkinDef[] CatSkins =
-        {
-            //             name       coat: hue    sat    val   cost   eyes: hue    sat    val
-            new SkinDef("Ginger",         0f,    1f,    1f,     0),
-            new SkinDef("Snow",           0f, 0.10f, 0.97f,   150,    0f, 1.25f, 1.05f),
-            new SkinDef("Sky",         168f, 0.62f,    1f,   400, -153f, 1.30f, 1.05f),
-            new SkinDef("Void",        254f, 0.50f, 0.46f,   900, -118f, 1.60f, 1.20f)
-        };
-
-        public static readonly SkinDef[] BasketSkins =
-        {
-            new SkinDef("Wicker", 0f, 1f, 1f, 0),
-            new SkinDef("Copper", -14f, 1.25f, 1f, 200),
-            new SkinDef("Mint", 132f, 0.70f, 1.05f, 500)
-        };
-
-        /// <summary>A representative mid-tone from each sprite, used to colour the shop swatches.</summary>
-        public static readonly Color CatSwatchBase = new Color(0.957f, 0.765f, 0.529f);
-        public static readonly Color BasketSwatchBase = new Color(0.62f, 0.38f, 0.18f);
-
-        public static SkinDef[] Skins(bool isCat) => isCat ? CatSkins : BasketSkins;
 
         public static int MaxLevel(UpgradeKind kind) => Costs(kind).Length;
 
@@ -73,94 +51,39 @@ namespace DeskPond
         {
             switch (kind)
             {
-                case UpgradeKind.Basket: return "Basket";
+                case UpgradeKind.Basket: return "Bucket";
                 case UpgradeKind.Lure: return "Lure";
                 default: return "Rod";
             }
         }
 
-        /// <summary>
-        /// Describes what a tier does. Pass the configured minutes per fish when adaptive pacing
-        /// is on: it prices a fish in minutes of work, so quoting a fixed input range would
-        /// advertise a number the game no longer uses.
-        /// </summary>
+        /// <summary>What a tier does, in the words the shop row shows.</summary>
         public static string Effect(UpgradeKind kind, int level, float adaptiveMinutes = 0f)
         {
             switch (kind)
             {
                 case UpgradeKind.Basket: return "holds " + Capacity(level);
-                case UpgradeKind.Lure: return FishPrice(level) + "c per fish";
+                case UpgradeKind.Lure: return "rare odds +" + (level * 30) + "%";
                 default:
                     if (adaptiveMinutes > 0f)
-                        return "bite every " +
-                               (adaptiveMinutes * RodFactor(level)).ToString("0.#") + " min";
+                        return "bite every " + (adaptiveMinutes * RodFactor(level)).ToString("0.#") + " min";
                     return "bite every " + MinInputs(level) + "-" + MaxInputs(level);
             }
         }
 
-        public static int Capacity(int basketLevel) => BaseCapacity + basketLevel * 15;
+        public static int Capacity(int basketLevel) => BaseCapacity + basketLevel * 4;
 
-        public static int FishPrice(int lureLevel) => BaseFishPrice + lureLevel * 4;
-
-        /// <summary>Each rod tier cuts the inputs needed per fish by 18%.</summary>
+        /// <summary>Each rod tier cuts the work needed per bite by 18%.</summary>
         public static float RodFactor(int rodLevel) => Mathf.Pow(0.82f, Mathf.Max(0, rodLevel));
+
+        /// <summary>Golden bites get likelier with a better rod.</summary>
+        public static float GoldenChance(int rodLevel) => 0.04f + rodLevel * 0.01f;
 
         public static int MinInputs(int rodLevel) =>
             Mathf.Max(10, Mathf.RoundToInt(BaseMinInputs * RodFactor(rodLevel)));
 
         public static int MaxInputs(int rodLevel) =>
             Mathf.Max(MinInputs(rodLevel) + 10, Mathf.RoundToInt(BaseMaxInputs * RodFactor(rodLevel)));
-
-        // Skin ownership is a bitmask per category; bit 0 (the default skin) is always set.
-        public static bool OwnsSkin(SaveData save, bool isCat, int index)
-        {
-            if (save == null || index < 0)
-                return false;
-            var mask = isCat ? save.ownedCatSkins : save.ownedBasketSkins;
-            return (mask & (1 << index)) != 0;
-        }
-
-        public static void GrantSkin(SaveData save, bool isCat, int index)
-        {
-            if (save == null || index < 0)
-                return;
-            if (isCat)
-                save.ownedCatSkins |= 1 << index;
-            else
-                save.ownedBasketSkins |= 1 << index;
-        }
-
-        public static int SkinCount(bool isCat) => Skins(isCat).Length;
-
-        /// <summary>A skin the player does not own yet, or -1 when everything is unlocked.</summary>
-        public static bool TryPickUnownedSkin(SaveData save, System.Random rng, out bool isCat, out int index)
-        {
-            var pool = new System.Collections.Generic.List<(bool cat, int idx)>();
-            for (var i = 0; i < CatSkins.Length; i++)
-                if (!OwnsSkin(save, true, i))
-                    pool.Add((true, i));
-            for (var i = 0; i < BasketSkins.Length; i++)
-                if (!OwnsSkin(save, false, i))
-                    pool.Add((false, i));
-
-            if (pool.Count == 0)
-            {
-                isCat = true;
-                index = -1;
-                return false;
-            }
-
-            var pick = pool[rng.Next(pool.Count)];
-            isCat = pick.cat;
-            index = pick.idx;
-            return true;
-        }
-
-        public static string SkinName(bool isCat, int index)
-        {
-            var skins = Skins(isCat);
-            return index >= 0 && index < skins.Length ? skins[index].Name : "?";
-        }
 
         public static int Level(SaveData save, UpgradeKind kind)
         {
@@ -180,15 +103,9 @@ namespace DeskPond
                 return;
             switch (kind)
             {
-                case UpgradeKind.Basket:
-                    save.basketLevel = level;
-                    break;
-                case UpgradeKind.Lure:
-                    save.lureLevel = level;
-                    break;
-                default:
-                    save.rodLevel = level;
-                    break;
+                case UpgradeKind.Basket: save.basketLevel = level; break;
+                case UpgradeKind.Lure: save.lureLevel = level; break;
+                default: save.rodLevel = level; break;
             }
         }
     }
