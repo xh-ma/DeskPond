@@ -68,7 +68,7 @@ namespace DeskPond
 
         [Min(5f)]
         [Tooltip("Seconds of unbroken idle time that yield one fish. The timer resets on any input.")]
-        public float idleSecondsPerFish = 300f;
+        public float idleSecondsPerFish = 1200f;
 
         [Min(0f)]
         [Tooltip("Shortest time between two bites, in seconds, however fast the typing. Bites are earned " +

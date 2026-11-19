@@ -867,7 +867,9 @@ namespace DeskPond
             else if (_save.dryMinutes >= 30f)
                 // A long dry spell: alternate between doing the books and giving up to sunbathe.
                 mood = Mathf.FloorToInt(_moodClock / 180f) % 2 == 0 ? Angler.Mood.Note : Angler.Mood.Sun;
-            else if (IdleSeconds > 150f)
+            else if (IdleSeconds > 60f)
+                // Left alone for a minute, the cat nods off. It still fishes in its sleep, just
+                // slowly: one fish per idleSecondsPerFish.
                 mood = Angler.Mood.Doze;
             else if (_save.affection < 15f)
                 // Not petted in days: a cross little face until someone makes it up to them.

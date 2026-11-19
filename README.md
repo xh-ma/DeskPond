@@ -15,7 +15,7 @@ more you type and click, the faster the fish bite.
   minutes of work at your own typical pace, so fast and slow typists wait about the
   same time.
 - Bites are at least 90 seconds apart, however fast you type.
-- When you're idle, the cat still catches a fish about every five minutes.
+- When you're idle, the cat falls asleep and only catches a fish about every 20 minutes.
 - Sometimes a gold `!` appears. Click it quickly for a legendary fish.
 - Long unbroken work stretches make rare fish more likely.
 

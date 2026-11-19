@@ -19,7 +19,7 @@ MonoBehaviour:
   menuScale: 2
   menuWidth: 340
   idleThresholdSeconds: 3
-  idleSecondsPerFish: 300
+  idleSecondsPerFish: 1200
   waterColor: {r: 0.45, g: 0.72, b: 0.95, a: 1}
   giftEverySeconds: 3600
   giftDriftSeconds: 14
