@@ -35,6 +35,8 @@ public static class DeskPondBuild
 
         var report = BuildPipeline.BuildPlayer(options);
         var summary = report.summary;
+        if (summary.result == BuildResult.Succeeded)
+            ShrinkAllocators(Path.Combine(dir, "DeskPond_Data", "boot.config"));
         Debug.Log("BUILD: result=" + summary.result + " errors=" + summary.totalErrors +
                   " size=" + summary.totalSize + " out=" + options.locationPathName);
 
@@ -121,6 +123,42 @@ public static class DeskPondBuild
         return scaled;
     }
 
+    /// <summary>
+    /// Unity's default allocator blocks are sized for games that stream gigabytes: 16-32 MB
+    /// reserved per allocator and per thread. A pet drawing a few sprites needs a fraction of
+    /// that, and these blocks are most of its resident memory. Overrides go in boot.config,
+    /// which the player reads at startup.
+    /// </summary>
+    static void ShrinkAllocators(string bootConfig)
+    {
+        var lines = new List<string>(File.Exists(bootConfig) ? File.ReadAllLines(bootConfig) : new string[0]);
+        lines.RemoveAll(l => l.StartsWith("memorysetup-") || l.StartsWith("gfx-enable-gfx-jobs") ||
+                             l.StartsWith("gfx-threading-mode") || l.StartsWith("job-worker-count"));
+        lines.AddRange(new[]
+        {
+            "memorysetup-main-allocator-block-size=2097152",
+            "memorysetup-thread-allocator-block-size=1048576",
+            "memorysetup-gfx-main-allocator-block-size=1048576",
+            "memorysetup-gfx-thread-allocator-block-size=1048576",
+            "memorysetup-cache-allocator-block-size=1048576",
+            "memorysetup-typetree-allocator-block-size=524288",
+            "memorysetup-bucket-allocator-block-size=4194304",
+            "memorysetup-bucket-allocator-block-count=1",
+            "memorysetup-temp-allocator-size-main=2097152",
+            "memorysetup-temp-allocator-size-gfx=131072",
+            "memorysetup-temp-allocator-size-job-worker=131072",
+            "memorysetup-temp-allocator-size-preload-manager=1048576",
+            "memorysetup-job-temp-allocator-block-size=524288",
+            "memorysetup-profiler-allocator-block-size=262144",
+            "memorysetup-profiler-bucket-allocator-block-size=262144",
+            "memorysetup-profiler-bucket-allocator-block-count=1",
+            "gfx-enable-gfx-jobs=0",
+            "job-worker-count=1",
+        });
+        File.WriteAllLines(bootConfig, lines);
+        Debug.Log("BUILD: shrank allocators in " + bootConfig);
+    }
+
     static void Configure()
     {
         ApplyIcons();
@@ -134,8 +172,20 @@ public static class DeskPondBuild
         PlayerSettings.fullScreenMode = FullScreenMode.Windowed;
         PlayerSettings.defaultIsNativeResolution = false;
         PlayerSettings.resizableWindow = false;
-        PlayerSettings.defaultScreenWidth = Screen.currentResolution.width;
-        PlayerSettings.defaultScreenHeight = Screen.currentResolution.height;
+        // Start small: DesktopWindow sizes the window to a band along the taskbar at runtime, and
+        // a full-screen first frame would allocate a full-screen swapchain for nothing.
+        PlayerSettings.defaultScreenWidth = 640;
+        PlayerSettings.defaultScreenHeight = 240;
+
+        // Footprint: strip unused engine and managed code.
+        PlayerSettings.stripEngineCode = true;
+        PlayerSettings.SetManagedStrippingLevel(NamedBuildTarget.Standalone, ManagedStrippingLevel.High);
+        PlayerSettings.gcIncremental = true;
+        PlayerSettings.usePlayerLog = true;
+
+        // Rendering a few sprites on its own thread costs a thread and its allocators for nothing.
+        PlayerSettings.MTRendering = false;
+        PlayerSettings.graphicsJobs = false;
 
         // Unity 6 makes the "Made with Unity" splash optional on every licence tier. A desktop pet
         // that shows a full-screen logo on launch is jarring, so it is turned off.

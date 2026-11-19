@@ -1,0 +1,6 @@
+<!-- High managed stripping is on to keep the player small. The game's own assembly is kept
+     whole: the save file is read by JsonUtility, which finds fields by serialization rather than
+     by code references, so the stripper cannot see that they are used. -->
+<linker>
+  <assembly fullname="Assembly-CSharp" preserve="all"/>
+</linker>
