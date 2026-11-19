@@ -13,18 +13,21 @@ namespace DeskPond
     public class DriftingGift : MonoBehaviour
     {
         /// <summary>Drawn larger than 1:1 so a 14px sprite still reads on a busy desktop.</summary>
-        const float BoxScale = 1.6f;
+        const float BoxScale = 1f;
 
         /// <summary>How far to one side of the cat the box parks, in world units.</summary>
-        const float ParkOffset = 1.35f;
+        const float ParkOffset = 2.6f;
 
         SpriteRenderer _sprite;
+        Atlas.Anim _anim;
+        float _frameClock;
         BoxCollider2D _collider;
         Transform _target;
         GameSession _session;
         AnimationCurve _drift;
         float _duration;
         float _floatY;
+        float _lift;
         float _parkOffset;
         float _bob;
         bool _waiting;
@@ -51,15 +54,18 @@ namespace DeskPond
             gift._duration = Mathf.Max(2f, duration);
 
             var sr = go.AddComponent<SpriteRenderer>();
-            sr.sprite = UiKit.GiftSprite();
-            sr.sortingOrder = 6;
+            gift._anim = Atlas.GetAnim("gift", new Vector2(0.5f, 0.5f));
+            sr.sprite = gift._anim.Frames[0];
+            sr.sortingOrder = 21;
+            sr.sharedMaterial = Atlas.Material;
             gift._sprite = sr;
             go.transform.localScale = Vector3.one * BoxScale;
 
             // Float the box ON the water rather than centred on it: a sprite centred on the
             // waterline sits half-buried in the taskbar and is nearly invisible.
             var halfHeight = sr.sprite.bounds.extents.y * BoxScale;
-            gift._floatY = waterY + halfHeight * 0.72f;
+            gift._lift = halfHeight * 0.72f;
+            gift._floatY = waterY + gift._lift;
 
             // Clickable once parked; sized generously so it is easy to hit.
             var col = go.AddComponent<BoxCollider2D>();
@@ -75,7 +81,8 @@ namespace DeskPond
             var rightEdge = camX + halfWidth + 1f;
             var fromLeft = Mathf.Abs(cat.position.x - leftEdge) > Mathf.Abs(cat.position.x - rightEdge);
             var startX = fromLeft ? leftEdge : rightEdge;
-            gift._parkOffset = fromLeft ? -ParkOffset : ParkOffset;
+            // Always park beyond the bucket, on the stern side, clear of the rod and line.
+            gift._parkOffset = ParkOffset;
 
             go.transform.position = new Vector3(startX, gift._floatY, 0f);
             session.ActiveGift = gift;
@@ -109,8 +116,8 @@ namespace DeskPond
                 var eased = _drift.Evaluate(k);
                 var end = ParkX();
 
-                transform.position = new Vector3(Mathf.Lerp(start.x, end, eased), Bob(), 0f);
-                transform.rotation = Quaternion.Euler(0f, 0f, Mathf.Sin(_bob * 0.7f) * 7f);
+                transform.position = Atlas.Snap(new Vector3(Mathf.Lerp(start.x, end, eased), Bob(), 0f));
+                Animate();
                 yield return null;
             }
 
@@ -120,12 +127,18 @@ namespace DeskPond
             // Park and idle-bob until clicked, with a gentle pulse hinting it is interactive.
             while (!_opening)
             {
-                transform.position = new Vector3(ParkX(), Bob(), 0f);
-                var pulse = 1f + Mathf.Sin(_bob * 1.6f) * 0.06f;
-                transform.localScale = Vector3.one * (BoxScale * pulse);
-                transform.rotation = Quaternion.Euler(0f, 0f, Mathf.Sin(_bob * 0.7f) * 5f);
+                transform.position = Atlas.Snap(new Vector3(ParkX(), Bob(), 0f));
+                transform.rotation = Quaternion.identity;
+                Animate();
                 yield return null;
             }
+        }
+
+        void Animate()
+        {
+            _frameClock += Time.deltaTime;
+            if (_anim != null && _anim.Frames.Length > 0)
+                _sprite.sprite = _anim.Frames[_anim.FrameAt(_frameClock)];
         }
 
         /// <summary>The cat can be dragged at any time, so the park spot is recomputed every frame.</summary>
@@ -134,6 +147,9 @@ namespace DeskPond
         float Bob()
         {
             _bob += Time.deltaTime * 2.4f;
+            // Ride the surface even if the pond is made deeper while the box is out.
+            if (_session != null && _session.Pond != null)
+                _floatY = _session.Pond.SurfaceWorldY + _lift;
             return _floatY + Mathf.Sin(_bob) * 0.1f;
         }
 
@@ -199,7 +215,7 @@ namespace DeskPond
 
             var renderer = go.GetComponent<ParticleSystemRenderer>();
             renderer.material = new Material(Shader.Find("Sprites/Default"));
-            renderer.sortingOrder = 7;
+            renderer.sortingOrder = 22;
 
             ps.Play();
         }
